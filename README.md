@@ -39,18 +39,9 @@ node index.js
 
 ## 📚 Documentación de Endpoints
 
-### 🎮 Comandos de Juegos
-- `/juegos/vida`: Sistema de eventos RPG
-- `/juegos/ruleta`: Juego de ruleta
-- `/juegos/duelo`: Sistema de duelos
-- `/juegos/apostar`: Sistema de apuestas
-
-### 📊 Sistema de Monedas
-- `/monedas`: Consulta de monedas
-- `/mercado`: Sistema de mercado
-
-### 🎮 Sistema de Adivinanzas
-- `/adivinanzas`: Sistema de adivinanzas aleatorias
+### - 🎮 Comandos de Juegos
+### - 📊 Sistema de Monedas
+### - 🎮 Sistema de Adivinanzas
 
 ## 🤝 Contribución
 
