@@ -1,110 +1,97 @@
-# 🎮 Twitch Commands
+# Twitch Commands — Endpoints HTTP para comandos de bot en Twitch
 
-Dashboard y motor de **comandos para Twitch** con un sistema **RPG**, mini-juegos y economía. Construido con **Next.js 15 (App/Pages)**, **React 19**, **TailwindCSS 4** y persistencia local en **SQLite**.
-
----
-
-## ✨ Características
-
-- 💰 **Economía** con monedas virtuales por espectador.
-- 🎯 **Duelos** entre chatters.
-- 🎰 **Ruleta** y sistema de apuestas.
-- 🔮 **Predicciones** con recompensa/penalización.
-- 🐲 **Sistema RPG** con eventos aleatorios y progresión.
-- 🧠 **Adivinanzas** con puntaje.
-- 📊 **Estadísticas** por usuario.
-- 🏪 **Mercado** interno.
+Colección de **endpoints HTTP** listos para conectarse a bots de chat de Twitch (**Nightbot**, **StreamElements**, **Botrix**, u otros). El bot llama al endpoint desde el chat con `!comando`, recibe una respuesta en texto plano y la escupe al canal. Sin instalar nada del lado del streamer.
 
 ---
 
-## 🛠️ Stack
+## Comandos disponibles
 
-- **Framework:** Next.js 15 (React 19) — dev con Turbopack
-- **UI:** TailwindCSS 4 · Radix UI (Tabs, Slot) · keep-react · lucide-react · phosphor-react
-- **Estado / util:** clsx · classnames · class-variance-authority · tailwind-merge
-- **Persistencia:** SQLite (`sqlite3`) → `database.db`
-- **Extras:** react-syntax-highlighter · @tailwindcss/postcss
+| Comando         | Endpoint                    | Qué hace                                                                     |
+| --------------- | --------------------------- | ---------------------------------------------------------------------------- |
+| `!ruleta`       | `GET /api/ruleta?usuario=X` | Gira una ruleta con premios o castigos para el usuario.                      |
+| `!ruletarusa`   | `GET /api/ruletarusa`       | Juego de ruleta rusa; el jugador puede ganar o perder monedas.               |
+| `!duelo`        | `GET /api/duelo`            | Desafía al streamer o a otro chatter en un duelo de dados.                   |
+| `!adivinanza`   | `GET /api/adivinanza`       | Genera una adivinanza para que los espectadores intenten resolverla.         |
+| `!8ball`        | `GET /api/8ball`            | Bola 8 mágica; responde una pregunta al azar.                                |
+| `!dice`         | `GET /api/dice`             | Tira dados con formato tipo D&D (`d20`, `2d6`, etc.).                        |
+| `!flip`         | `GET /api/flip`             | Lanza una moneda (cara / cruz).                                              |
+| `!animal`       | `GET /api/animal`           | Devuelve el nombre y foto de un animal random.                               |
+| `!superhero`    | `GET /api/superhero`        | Compara al usuario con un superhéroe al azar.                                |
+| `!cumplido`     | `GET /api/cumplido`         | Manda un cumplido random al usuario.                                         |
+| `!insulto`      | `GET /api/insulto`          | Manda un "insulto" (siempre en tono cómico) al usuario.                      |
+| `!facha`        | `GET /api/facha`            | Muestra una imagen aleatoria "con facha".                                    |
+| `!memide`       | `GET /api/memide`           | Muestra una imagen aleatoria de Memide.                                      |
+| `!factos`       | `GET /api/factos`           | Devuelve un dato curioso / fun fact.                                         |
+
+El endpoint `GET /api/commands` (visible desde la landing) devuelve la lista completa junto con la sintaxis de integración por plataforma.
 
 ---
 
-## 🚀 Comandos
+## Cómo integrar en tu bot de Twitch
+
+### Nightbot
+
+```
+!addcom !ruleta $(urlfetch https://twitchcomm.vercel.app/api/ruleta?usuario=$(user))
+```
+
+### StreamElements
+
+```
+!command add ruleta ${urlfetch https://twitchcomm.vercel.app/api/ruleta?usuario=${user}}
+```
+
+### Botrix
+
+```
+!custom add ruleta ${webhook:https://twitchcomm.vercel.app/api/ruleta?usuario=${sender}}
+```
+
+Cambia `ruleta` por cualquier otro comando de la tabla — todos siguen el mismo patrón.
+
+---
+
+## Bajo el capó
+
+- **Framework:** Next.js 15 (Pages Router) con **React 19**.
+- **Persistencia:** SQLite local (`database.db`) — usado por comandos con estado (economía, ruleta, historial).
+- **UI de la landing:** TailwindCSS 4 + Radix UI + keep-react + Lucide/Phosphor.
+- **Estructura:** cada comando es un handler bajo `pages/api/<comando>.js` que devuelve texto plano listo para chat.
+
+---
+
+## Setup local
 
 ```bash
-# Instalar
+git clone https://github.com/DarkSack/twitch_commands.git
+cd twitch_commands
 npm install
-
-# Desarrollo (con Turbopack)
 npm run dev            # http://localhost:3000
-
-# Build de producción
-npm run build
-
-# Servidor de producción
-npm start
-
-# Lint
-npm run lint
 ```
+
+Deploy: cualquier plataforma serverless (Vercel recomendado — está pensado para eso).
 
 ---
 
-## 🔐 Variables de entorno
-
-Crea un archivo `.env.local` con las claves que uses:
-
-```env
-PORT=3000
-# Configura aquí tus credenciales de Twitch, OAuth, etc.
-TWITCH_CLIENT_ID=...
-TWITCH_CLIENT_SECRET=...
-TWITCH_BOT_TOKEN=...
-```
-
----
-
-## 📁 Estructura
+## Estructura
 
 ```
 twitch_commands/
-├── pages/                # Rutas Next (App Router / Pages)
-│   ├── api/              # Endpoints REST de comandos
-│   ├── _app.js
-│   └── index.js
-├── commands/
-│   └── index.js          # Registro central de comandos
-├── components/           # UI (shadcn-style + Radix)
-├── lib/                  # Cliente SQLite, helpers
-├── utils/
-├── styles/
-├── public/
-├── database.db           # Base local SQLite
-├── next.config.mjs
-└── package.json
+├── pages/
+│   ├── index.js           # Landing con lista de comandos
+│   └── api/               # Un handler por comando
+│       ├── ruleta.js
+│       ├── ruletarusa.js
+│       ├── duelo.js
+│       ├── adivinanza.js
+│       ├── 8ball.js
+│       └── ...
+├── commands/index.js      # Catálogo (nombre + descripción + uso por bot)
+├── utils/functions.js     # Lógica de juegos (girarRuleta, tirarDados, ...)
+├── lib/                   # Cliente SQLite, helpers
+├── components/            # UI de la landing
+└── database.db            # SQLite local
 ```
-
----
-
-## 📚 Categorías de endpoints
-
-- 🎮 **Juegos** — `/api/roulette`, `/api/duel`, `/api/rpg`
-- 💰 **Economía** — `/api/coins`, `/api/market`
-- 🎲 **Predicciones** — `/api/predictions`
-- 🧠 **Adivinanzas** — `/api/riddles`
-- 📊 **Estadísticas** — `/api/stats`
-
-> Los nombres exactos pueden variar; revisa `pages/api/` y `commands/index.js` para el mapa completo.
-
----
-
-## 🤝 Contribución
-
-_Issues_ y _pull requests_ bienvenidos.
-
----
-
-## 📝 Licencia
-
-MIT.
 
 ---
 
