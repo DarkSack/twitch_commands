@@ -1,291 +1,247 @@
-const { premios, eventos, catalogo } = require("./const");
+import { createClient } from "@libsql/client";
+import { premios, eventos, catalogo } from "./const";
 
-const path = require("node:path");
+/* ── Base de datos ────────────────────────────────────────────────
+   Se pasa de `sqlite3` a `@libsql/client`.
 
-const sqlite3 = require("sqlite3").verbose();
+   El motivo no es preferencia: `sqlite3` escribe en un fichero del disco, y
+   en Vercel el sistema de ficheros es de solo lectura salvo /tmp, que es
+   propio de cada instancia y se destruye sola. Con 14 comandos de economia
+   eso no era una limitacion, era que las monedas, el inventario, las rachas
+   y el ranking desaparecian sin dar ningun error.
 
-/**
- * Ruta del fichero SQLite.
- *
- * Estaba fija en "./database.db", relativa al directorio de trabajo del
- * proceso. En un despliegue serverless (Vercel) el sistema de ficheros es de
- * SOLO LECTURA salvo /tmp, asi que ahi cualquier escritura falla: las monedas,
- * el inventario y los duelos no se guardaban y el endpoint devolvia 500.
- *
- * AVISO IMPORTANTE: apuntar a /tmp evita el error, pero NO da persistencia.
- * Cada instancia serverless tiene su propio /tmp y se destruye sola, asi que
- * el progreso se pierde. Para que el juego funcione de verdad en produccion
- * hace falta una base de datos externa (Turso, Postgres, Redis). Esto es una
- * tirita, no la cura; queda explicado en el README.
- */
-const DB_PATH =
-  process.env.DATABASE_PATH ||
-  (process.env.VERCEL ? path.join("/tmp", "database.db") : "./database.db");
+   libSQL habla el MISMO SQL que SQLite, asi que ninguna consulta cambia, y
+   el mismo cliente sirve para los dos casos:
+     - `file:` en local, sin cuenta ni red
+     - `libsql://` contra Turso en produccion, con persistencia de verdad
 
-const db = new sqlite3.Database(DB_PATH, (err) => {
-  if (err) {
-    console.error(`Error al conectar a la base de datos (${DB_PATH}):`, err);
-  } else {
-    console.log(`Conectado a SQLite en ${DB_PATH}`);
-  }
-});
-/* ── SQLite con promesas ───────────────────────────────────────────
-   El codigo original encadenaba callbacks a cuatro y cinco niveles, que es
-   de donde salieron la mitad de los fallos (rechazos sin return, errores
-   ignorados). Todo lo nuevo va contra estos tres envoltorios. */
+   Un solo camino de codigo en vez de dos implementaciones que se desincronizan.
+*/
+
+const URL_TURSO = process.env.TURSO_DATABASE_URL;
+const TOKEN_TURSO = process.env.TURSO_AUTH_TOKEN;
+
+/** Fichero local cuando no hay Turso configurado. */
+const FICHERO_LOCAL = `file:${process.env.DATABASE_PATH || "./database.db"}`;
+
+export const usandoTurso = Boolean(URL_TURSO);
+
+const db = createClient(
+  usandoTurso
+    ? { url: URL_TURSO, authToken: TOKEN_TURSO }
+    : { url: FICHERO_LOCAL }
+);
+
+if (!usandoTurso && process.env.NODE_ENV === "production") {
+  // Aviso explicito: es exactamente el fallo que motivo esta migracion, y sin
+  // este mensaje volveria a pasar desapercibido hasta que alguien reclamara
+  // sus monedas.
+  console.warn(
+    "[db] TURSO_DATABASE_URL no esta configurada: se usa un fichero local. " +
+      "En serverless eso significa que los datos NO se guardan."
+  );
+}
+
+/* ── Envoltorios ──────────────────────────────────────────────────
+   Mantienen la firma de antes (`sql, params`) para que el resto del fichero
+   no cambie, pero por debajo es `client.execute`, que ya devuelve promesas:
+   se acabaron las piramides de callbacks. */
 
 export async function run(sql, params = []) {
   await esquemaListo;
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) return reject(err);
-      resolve(this);
-    });
-  });
+  const r = await db.execute({ sql, args: params });
+  // `changes` imita a sqlite3, que es lo que espera quien ya lo usaba.
+  return { changes: Number(r.rowsAffected ?? 0), lastID: r.lastInsertRowid };
 }
 
 export async function get(sql, params = []) {
   await esquemaListo;
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
-  });
+  const r = await db.execute({ sql, args: params });
+  return r.rows[0];
 }
 
 export async function all(sql, params = []) {
   await esquemaListo;
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
-  });
+  const r = await db.execute({ sql, args: params });
+  return r.rows;
 }
 
-let cachedOferta;
-let cachedFecha;
+/** Igual que `run`, pero sin esperar al esquema: lo usa el propio arranque. */
+async function runCrudo(sql, params = []) {
+  return db.execute({ sql, args: params });
+}
+
+/**
+ * Varias sentencias como una sola unidad.
+ *
+ * Sustituye a los `BEGIN IMMEDIATE` / `COMMIT` manuales: con un cliente HTTP
+ * cada sentencia suelta puede ir por una conexion distinta, asi que una
+ * transaccion abierta a mano no garantiza nada. `batch` con modo "write" si.
+ */
+export async function transaccion(sentencias) {
+  await esquemaListo;
+  return db.batch(
+    sentencias.map(([sql, args = []]) => ({ sql, args })),
+    "write"
+  );
+}
+
+/* ── Esquema ──────────────────────────────────────────────────────
+   Se crea una sola vez y todo lo demas espera a `esquemaListo`.
+
+   Antes eran `db.run(...)` sueltos al cargar el modulo y sqlite3 no los
+   serializaba: el `ALTER TABLE inventario` llegaba a ejecutarse ANTES que su
+   `CREATE TABLE` y moria con "no such table". Aqui el orden es el del
+   `await`, que no admite discusion. */
+
+const esquemaListo = (async () => {
+  await runCrudo(`
+    CREATE TABLE IF NOT EXISTS usuarios (
+        nombre TEXT PRIMARY KEY,
+        dinero INTEGER DEFAULT 1000,
+        felicidad INTEGER DEFAULT 50,
+        salud INTEGER DEFAULT 50,
+        social INTEGER DEFAULT 50,
+        inteligencia INTEGER DEFAULT 50,
+        energia INTEGER DEFAULT 100,
+        estres INTEGER DEFAULT 0,
+        edad INTEGER DEFAULT 18,
+        profesion TEXT DEFAULT 'Desempleado',
+        diasVividos INTEGER DEFAULT 0,
+        ultimoEvento INTEGER DEFAULT 0
+    )`);
+
+  await runCrudo(`
+    CREATE TABLE IF NOT EXISTS inventario (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        usuario TEXT,
+        item TEXT,
+        cantidad INTEGER DEFAULT 1,
+        FOREIGN KEY(usuario) REFERENCES usuarios(nombre)
+    )`);
+
+  // Columnas anadidas despues. SQLite no tiene ADD COLUMN IF NOT EXISTS, asi
+  // que se intenta y se ignora el error de columna repetida.
+  for (const [tabla, columna, tipo] of [
+    ["inventario", "equipado", "INTEGER DEFAULT 0"],
+    ["usuarios", "ultimoTrabajo", "INTEGER DEFAULT 0"],
+    ["usuarios", "ultimaRecompensa", "INTEGER DEFAULT 0"],
+    ["usuarios", "racha", "INTEGER DEFAULT 0"],
+  ]) {
+    try {
+      await runCrudo(`ALTER TABLE ${tabla} ADD COLUMN ${columna} ${tipo}`);
+    } catch (err) {
+      if (!/duplicate column/i.test(err.message)) {
+        console.error(`Migracion ${tabla}.${columna}:`, err.message);
+      }
+    }
+  }
+
+  // Estar equipado se guardaba renombrando la fila a "Espada (Equipado)": eso
+  // rompia el ON CONFLICT y duplicaba filas. Se recupera lo antiguo.
+  await runCrudo(
+    "UPDATE inventario SET equipado = 1, item = REPLACE(item, ' (Equipado)', '') WHERE item LIKE '%(Equipado)'"
+  );
+
+  // Sin este indice el ON CONFLICT(usuario, item) del mercado falla. Se
+  // limpian antes los duplicados o la creacion del indice se cae.
+  await runCrudo(`
+    DELETE FROM inventario WHERE id NOT IN (
+      SELECT MIN(id) FROM inventario GROUP BY usuario, item
+    )`);
+  await runCrudo(`
+    CREATE UNIQUE INDEX IF NOT EXISTS inventario_usuario_item
+        ON inventario (usuario, item)`);
+
+  await runCrudo(`
+    CREATE TABLE IF NOT EXISTS mascotas (
+        usuario TEXT NOT NULL,
+        nombre  TEXT NOT NULL,
+        nivel   INTEGER DEFAULT 1,
+        hambre  INTEGER DEFAULT 100,
+        PRIMARY KEY (usuario, nombre)
+    )`);
+
+  await runCrudo(`
+    CREATE TABLE IF NOT EXISTS duelos_stats (
+        usuario TEXT PRIMARY KEY,
+        victorias INTEGER DEFAULT 0,
+        derrotas INTEGER DEFAULT 0,
+        monedas_ganadas INTEGER DEFAULT 0,
+        ultimo_duelo TIMESTAMP
+    )`);
+
+  await runCrudo(`
+    CREATE TABLE IF NOT EXISTS duelos_historial (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        retador TEXT,
+        retado TEXT,
+        ganador TEXT,
+        tipo_victoria TEXT,
+        monedas_apostadas INTEGER,
+        fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )`);
+})();
+
+export { esquemaListo };
+
 export function formatearDinero(cantidad) {
   if (cantidad >= 1_000_000_000) {
-    return (cantidad / 1_000_000_000).toFixed(2) + "B"; // Billones
+    return (cantidad / 1_000_000_000).toFixed(2) + "B";
   } else if (cantidad >= 1_000_000) {
-    return (cantidad / 1_000_000).toFixed(2) + "M"; // Millones
+    return (cantidad / 1_000_000).toFixed(2) + "M";
   } else if (cantidad >= 1_000) {
-    return (cantidad / 1_000).toFixed(1) + "K"; // Miles
+    return (cantidad / 1_000).toFixed(1) + "K";
   }
-  return cantidad.toString(); // Si es menor a 1000, no cambia
+  return cantidad.toString();
 }
-
-/* ── Esquema ───────────────────────────────────────────────────────
-   TODO va dentro de un unico `db.serialize()` y detras de la promesa
-   `esquemaListo`.
-
-   Antes eran `db.run(...)` sueltos al cargar el modulo. El driver de sqlite3
-   NO serializa por defecto, asi que el `ALTER TABLE inventario` se ejecutaba
-   antes que su `CREATE TABLE` y moria con "no such table: inventario"; el
-   indice unico y la migracion de `equipado` se perdian con el. Ademas la
-   primera peticion podia llegar antes de que existiera ninguna tabla.
-
-   Los helpers `run`/`get`/`all` esperan a `esquemaListo`, asi que a partir de
-   aqui nada consulta una tabla que todavia no existe. */
-
-export const esquemaListo = new Promise((resolve, reject) => {
-  db.serialize(() => {
-    db.run(`
-      CREATE TABLE IF NOT EXISTS usuarios (
-          nombre TEXT PRIMARY KEY,
-          dinero INTEGER DEFAULT 1000,
-          felicidad INTEGER DEFAULT 50,
-          salud INTEGER DEFAULT 50,
-          social INTEGER DEFAULT 50,
-          inteligencia INTEGER DEFAULT 50,
-          energia INTEGER DEFAULT 100,
-          estres INTEGER DEFAULT 0,
-          edad INTEGER DEFAULT 18,
-          profesion TEXT DEFAULT 'Desempleado',
-          diasVividos INTEGER DEFAULT 0,
-          ultimoEvento INTEGER DEFAULT 0
-      )`);
-
-    db.run(`
-      CREATE TABLE IF NOT EXISTS inventario (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          usuario TEXT,
-          item TEXT,
-          cantidad INTEGER DEFAULT 1,
-          FOREIGN KEY(usuario) REFERENCES usuarios(nombre)
-      )`);
-
-    // Estar equipado se guardaba renombrando la fila a "Espada (Equipado)".
-    // Eso rompia el ON CONFLICT (para SQLite son dos items distintos),
-    // duplicaba filas al comprar una segunda copia, y se corrompia con
-    // cualquier item cuyo nombre llevara ese sufijo. Ahora es una columna.
-    db.run("ALTER TABLE inventario ADD COLUMN equipado INTEGER DEFAULT 0", (err) => {
-      // "duplicate column" solo significa que ya se migro antes.
-      if (err && !/duplicate column/i.test(err.message)) {
-        console.error("Migracion inventario.equipado:", err.message);
-      }
-    });
-    db.run(
-      "UPDATE inventario SET equipado = 1, item = REPLACE(item, ' (Equipado)', '') WHERE item LIKE '%(Equipado)'"
-    );
-
-    // Sin este indice, el ON CONFLICT(usuario, item) del mercado fallaba con
-    // "does not match any PRIMARY KEY or UNIQUE constraint". Se limpian antes
-    // los duplicados que pudieran existir, o la creacion del indice falla.
-    db.run(`
-      DELETE FROM inventario WHERE id NOT IN (
-        SELECT MIN(id) FROM inventario GROUP BY usuario, item
-      )`);
-    db.run(`
-      CREATE UNIQUE INDEX IF NOT EXISTS inventario_usuario_item
-          ON inventario (usuario, item)`);
-
-    // El mercado inserta y borra en `mascotas`, y la tabla no se creaba en
-    // ningun sitio: comprar un item con evolucion daba "no such table".
-    db.run(`
-      CREATE TABLE IF NOT EXISTS mascotas (
-          usuario TEXT NOT NULL,
-          nombre  TEXT NOT NULL,
-          nivel   INTEGER DEFAULT 1,
-          hambre  INTEGER DEFAULT 100,
-          PRIMARY KEY (usuario, nombre)
-      )`);
-
-    db.run(`
-      CREATE TABLE IF NOT EXISTS duelos_stats (
-          usuario TEXT PRIMARY KEY,
-          victorias INTEGER DEFAULT 0,
-          derrotas INTEGER DEFAULT 0,
-          monedas_ganadas INTEGER DEFAULT 0,
-          ultimo_duelo TIMESTAMP
-      )`);
-
-    db.run(`
-      CREATE TABLE IF NOT EXISTS duelos_historial (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          retador TEXT,
-          retado TEXT,
-          ganador TEXT,
-          tipo_victoria TEXT,
-          monedas_apostadas INTEGER,
-          fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )`);
-
-    // Columnas de los comandos de economia. Van aqui, en el mismo bloque
-    // serializado, para que no vuelvan a correr contra tablas inexistentes.
-    for (const [columna, tipo] of [
-      ["ultimoTrabajo", "INTEGER DEFAULT 0"],
-      ["ultimaRecompensa", "INTEGER DEFAULT 0"],
-      ["racha", "INTEGER DEFAULT 0"],
-    ]) {
-      db.run(`ALTER TABLE usuarios ADD COLUMN ${columna} ${tipo}`, (err) => {
-        if (err && !/duplicate column/i.test(err.message)) {
-          console.error(`Migracion usuarios.${columna}:`, err.message);
-        }
-      });
-    }
-
-    // Marca el final de la cola: al ejecutarse, todo lo anterior ya corrio.
-    db.run("SELECT 1", (err) => (err ? reject(err) : resolve()));
-  });
-});
 
 //Funciones 🛠️
-export async function obtenerUsuario(nombre) {
-  await esquemaListo;
-  return new Promise((resolve, reject) => {
-    db.get(
-      "SELECT nombre, diasVividos, ultimoEvento, dinero, felicidad, salud, social, inteligencia, energia, estres, edad, profesion FROM usuarios WHERE nombre = ?",
-      [nombre],
-      (err, row) => {
-        if (err) {
-          reject(err);
-          return;
-        }
+const COLUMNAS_USUARIO =
+  "nombre, diasVividos, ultimoEvento, dinero, felicidad, salud, social, inteligencia, energia, estres, edad, profesion";
 
-        if (row) {
-          resolve(row); // Retorna el usuario existente
-        } else {
-          // Crear nuevo usuario si no existe
-          db.run(
-            `
-                INSERT INTO usuarios (
-                  nombre, dinero, felicidad, salud, social, inteligencia, energia, estres, edad, profesion, diasVividos, ultimoEvento
-                ) VALUES (?, 1000, 50, 50, 50, 50, 100, 0, 18, 'Desempleado', 0, 0)
-              `,
-            // `ultimoEvento` arranca en 0, no en Date.now(). Con la hora
-            // actual, el usuario recien creado ya estaba en cooldown y su
-            // primer !duelo respondia "espera N minutos": nadie podia
-            // estrenar el comando.
-            [nombre],
-            (err) => {
-              if (err) {
-                reject(err);
-                return;
-              }
-              // Obtener el usuario recién creado
-              db.get(
-                // `nombre` faltaba en este SELECT y si estaba en el de
-                // arriba. Resultado: un usuario recien creado volvia sin
-                // nombre, y el duelo narraba "undefined VS undefined". No se
-                // veia porque el cooldown mal calculado impedia que nadie
-                // llegase hasta aqui en su primer duelo.
-                "SELECT nombre, diasVividos, ultimoEvento, dinero, felicidad, salud, social, inteligencia, energia, estres, edad, profesion FROM usuarios WHERE nombre = ?",
-                [nombre],
-                (err, row) => {
-                  if (err) {
-                    reject(err);
-                  } else {
-                    resolve(row);
-                  }
-                }
-              );
-            }
-          );
-        }
-      }
-    );
-  });
+/**
+ * Devuelve el usuario, creandolo si es la primera vez que aparece.
+ *
+ * `ultimoEvento` arranca en 0 y no en Date.now(): con la hora actual, el
+ * usuario recien creado ya estaba en cooldown y su primer !duelo se rechazaba
+ * siempre. Y el SELECT incluye `nombre`, que faltaba en la version anterior
+ * para el usuario nuevo y hacia que el duelo narrara "undefined VS undefined".
+ */
+export async function obtenerUsuario(nombre) {
+  const existente = await get(
+    `SELECT ${COLUMNAS_USUARIO} FROM usuarios WHERE nombre = ?`,
+    [nombre]
+  );
+  if (existente) return existente;
+
+  await run(
+    `INSERT INTO usuarios (
+       nombre, dinero, felicidad, salud, social, inteligencia,
+       energia, estres, edad, profesion, diasVividos, ultimoEvento
+     ) VALUES (?, 1000, 50, 50, 50, 50, 100, 0, 18, 'Desempleado', 0, 0)
+     ON CONFLICT(nombre) DO NOTHING`,
+    [nombre]
+  );
+
+  return get(`SELECT ${COLUMNAS_USUARIO} FROM usuarios WHERE nombre = ?`, [
+    nombre,
+  ]);
 }
 
-// Función para actualizar usuario
 export async function actualizarUsuario(nombre, datos) {
-  await esquemaListo;
-  return new Promise((resolve, reject) => {
-    const query = `
-            UPDATE usuarios SET
-                dinero = ?,
-                felicidad = ?,
-                salud = ?,
-                social = ?,
-                inteligencia = ?,
-                energia = ?,
-                estres = ?,
-                edad = ?,
-                profesion = ?,
-                diasVividos = ?,
-                ultimoEvento = ?
-            WHERE nombre = ?
-        `;
-
-    db.run(
-      query,
-      [
-        datos.dinero,
-        datos.felicidad,
-        datos.salud,
-        datos.social,
-        datos.inteligencia,
-        datos.energia,
-        datos.estres,
-        datos.edad,
-        datos.profesion,
-        datos.diasVividos,
-        datos.ultimoEvento,
-        nombre,
-      ],
-      (err) => {
-        if (err) return reject(err);
-        else resolve();
-      }
-    );
-  });
+  await run(
+    `UPDATE usuarios SET
+        dinero = ?, felicidad = ?, salud = ?, social = ?, inteligencia = ?,
+        energia = ?, estres = ?, edad = ?, profesion = ?, diasVividos = ?,
+        ultimoEvento = ?
+      WHERE nombre = ?`,
+    [
+      datos.dinero, datos.felicidad, datos.salud, datos.social,
+      datos.inteligencia, datos.energia, datos.estres, datos.edad,
+      datos.profesion, datos.diasVividos, datos.ultimoEvento, nombre,
+    ]
+  );
 }
 
 // Función auxiliar para generar eventos aleatorios
@@ -307,19 +263,10 @@ export function generarEvento(profesion) {
  * El formateo es cosa de quien muestra el dato, no de quien lo consulta.
  */
 export async function getMonedas(usuario) {
-  return new Promise((resolve, reject) => {
-    db.get(
-      "SELECT dinero FROM usuarios WHERE nombre = ?",
-      [usuario],
-      (err, row) => {
-        if (err) {
-          reject(err);
-          return;
-        }
-        resolve(Number(row?.dinero) || 0);
-      }
-    );
-  });
+  const fila = await get("SELECT dinero FROM usuarios WHERE nombre = ?", [
+    usuario,
+  ]);
+  return Number(fila?.dinero) || 0;
 }
 
 export async function getEquipo(usuario) {
@@ -330,57 +277,33 @@ export async function getEquipo(usuario) {
   return filas.map((f) => f.item);
 }
 
-// Función separada para manejar la lógica de apostar
+/**
+ * Apuesta simple al 50 %.
+ *
+ * La expone `!apostar` a traves de `utils/economia.js`; se conserva aqui
+ * porque es donde vivia y para no romper a quien la importara.
+ */
 export async function procesarApuesta(usuario, cantidad) {
-  return new Promise((resolve, reject) => {
-    if (isNaN(cantidad) || cantidad <= 0) {
-      resolve("❌ Debes apostar una cantidad válida de monedas.");
-      return;
-    }
+  const monto = Math.floor(Number(cantidad));
+  if (!Number.isFinite(monto) || monto <= 0) {
+    return "❌ Debes apostar una cantidad válida de monedas.";
+  }
 
-    db.get(
-      "SELECT dinero FROM usuarios WHERE nombre = ?",
-      [usuario],
-      (err, row) => {
-        if (err) {
-          console.error(err);
-          reject(new Error("Error interno del servidor"));
-          return;
-        }
+  const { dinero } = await obtenerUsuario(usuario);
+  if (dinero < monto) {
+    return `❌ ${usuario}, no tienes suficientes monedas para apostar. Tienes ${dinero} monedas.`;
+  }
 
-        if (!row || row.dinero < cantidad) {
-          resolve(
-            `❌ ${usuario}, no tienes suficientes monedas para apostar. Tienes ${
-              row?.dinero || 0
-            } monedas.`
-          );
-          return;
-        }
+  const gano = Math.random() < 0.5;
+  const nuevoSaldo = gano ? dinero + monto : dinero - monto;
+  await run("UPDATE usuarios SET dinero = ? WHERE nombre = ?", [
+    nuevoSaldo,
+    usuario,
+  ]);
 
-        // Resultado de la apuesta (50% de ganar)
-        const gano = Math.random() < 0.5;
-        const nuevoSaldo = gano ? row.dinero + cantidad : row.dinero - cantidad;
-
-        db.run(
-          "UPDATE usuarios SET dinero = ? WHERE nombre = ?",
-          [nuevoSaldo, usuario],
-          (err) => {
-            if (err) {
-              console.error(err);
-              reject(new Error("Error interno del servidor"));
-              return;
-            }
-
-            resolve(
-              gano
-                ? `🎉 ¡Felicidades ${usuario}! Ganaste ${cantidad} monedas. Ahora tienes ${nuevoSaldo} monedas.`
-                : `😢 Lo siento ${usuario}, perdiste ${cantidad} monedas. Ahora tienes ${nuevoSaldo} monedas.`
-            );
-          }
-        );
-      }
-    );
-  });
+  return gano
+    ? `🎉 ¡Felicidades ${usuario}! Ganaste ${monto} monedas. Ahora tienes ${nuevoSaldo} monedas.`
+    : `😢 Lo siento ${usuario}, perdiste ${monto} monedas. Ahora tienes ${nuevoSaldo} monedas.`;
 }
 
 /** Aplica un premio del catalogo sobre la fila del usuario. */
@@ -399,20 +322,17 @@ function aplicarPremio(row, premio) {
 }
 
 /** Guarda los stats de un premio ya calculado. */
-function guardarStats(usuario, v) {
-  return new Promise((resolve, reject) => {
-    db.run(
-      `UPDATE usuarios SET
-          dinero = ?, felicidad = ?, salud = ?, social = ?,
-          inteligencia = ?, energia = ?, estres = ?, edad = ?
-          WHERE nombre = ?`,
-      [
-        v.dinero, v.felicidad, v.salud, v.social,
-        v.inteligencia, v.energia, v.estres, v.edad, usuario,
-      ],
-      (err) => (err ? reject(err) : resolve())
-    );
-  });
+async function guardarStats(usuario, v) {
+  await run(
+    `UPDATE usuarios SET
+        dinero = ?, felicidad = ?, salud = ?, social = ?,
+        inteligencia = ?, energia = ?, estres = ?, edad = ?
+        WHERE nombre = ?`,
+    [
+      v.dinero, v.felicidad, v.salud, v.social,
+      v.inteligencia, v.energia, v.estres, v.edad, usuario,
+    ]
+  );
 }
 
 /**
@@ -631,26 +551,28 @@ function procesarDuelo(datosRetador, datosRetado, monedasApostadas) {
             ])
               .then(() => {
                 if (monedasApostadas > 0) {
-                  db.run(
-                    "UPDATE usuarios SET dinero = dinero + ? WHERE nombre = ?",
-                    [monedasApostadas, ganador],
-                    (err) => {
-                      if (err) return reject(err);
-                      db.run(
-                        "UPDATE usuarios SET dinero = dinero - ? WHERE nombre = ?",
-                        [monedasApostadas, perdedor],
-                        (err) => {
-                          if (err) return reject(err);
-                          narrativa.push(
-                            `\n💰 ${ganador} gana ${monedasApostadas} monedas de ${perdedor}!`
-                          );
-                          guardarEstadisticasDuelo(ganador, perdedor)
-                            .then(() => resolve(narrativa.join("\n")))
-                            .catch(reject);
-                        }
+                  // Las dos actualizaciones van juntas. Antes eran dos
+                  // escrituras sueltas encadenadas por callback: si fallaba la
+                  // segunda, el ganador ya se habia quedado con unas monedas
+                  // que nadie habia perdido.
+                  transaccion([
+                    [
+                      "UPDATE usuarios SET dinero = dinero + ? WHERE nombre = ?",
+                      [monedasApostadas, ganador],
+                    ],
+                    [
+                      "UPDATE usuarios SET dinero = dinero - ? WHERE nombre = ?",
+                      [monedasApostadas, perdedor],
+                    ],
+                  ])
+                    .then(() => {
+                      narrativa.push(
+                        `\n💰 ${ganador} gana ${monedasApostadas} monedas de ${perdedor}!`
                       );
-                    }
-                  );
+                      return guardarEstadisticasDuelo(ganador, perdedor);
+                    })
+                    .then(() => resolve(narrativa.join("\n")))
+                    .catch(reject);
                 } else {
                   guardarEstadisticasDuelo(ganador, perdedor)
                     .then(() => resolve(narrativa.join("\n")))
@@ -665,25 +587,18 @@ function procesarDuelo(datosRetador, datosRetado, monedasApostadas) {
   });
 }
 
-// Función auxiliar para guardar estadísticas del duelo
-function guardarEstadisticasDuelo(ganador, perdedor) {
-  return new Promise((resolve, reject) => {
-    db.run(
+/** Suma la victoria y la derrota como una sola unidad. */
+async function guardarEstadisticasDuelo(ganador, perdedor) {
+  await transaccion([
+    [
       "INSERT INTO duelos_stats (usuario, victorias, ultimo_duelo) VALUES (?, 1, CURRENT_TIMESTAMP) ON CONFLICT(usuario) DO UPDATE SET victorias = victorias + 1, ultimo_duelo = CURRENT_TIMESTAMP",
       [ganador],
-      (err) => {
-        if (err) return reject(err);
-        db.run(
-          "INSERT INTO duelos_stats (usuario, derrotas, ultimo_duelo) VALUES (?, 1, CURRENT_TIMESTAMP) ON CONFLICT(usuario) DO UPDATE SET derrotas = derrotas + 1, ultimo_duelo = CURRENT_TIMESTAMP",
-          [perdedor],
-          (err) => {
-            if (err) return reject(err);
-            resolve();
-          }
-        );
-      }
-    );
-  });
+    ],
+    [
+      "INSERT INTO duelos_stats (usuario, derrotas, ultimo_duelo) VALUES (?, 1, CURRENT_TIMESTAMP) ON CONFLICT(usuario) DO UPDATE SET derrotas = derrotas + 1, ultimo_duelo = CURRENT_TIMESTAMP",
+      [perdedor],
+    ],
+  ]);
 }
 
 export const getEmoji = (size) => {

@@ -11,7 +11,14 @@
  */
 
 import { catalogo } from "./const";
-import { all, formatearDinero, get, obtenerUsuario, run } from "./functions";
+import {
+  all,
+  formatearDinero,
+  get,
+  obtenerUsuario,
+  run,
+  transaccion,
+} from "./functions";
 
 const HORA = 60 * 60 * 1000;
 const DIA = 24 * HORA;
@@ -170,23 +177,23 @@ export async function regalar(origen, destino, cantidadBruta) {
   }
   await obtenerUsuario(destino);
 
-  // Las dos escrituras van en una transacción: sin ella, un fallo entre medias
-  // haría desaparecer las monedas del origen sin que llegaran al destino.
-  await run("BEGIN IMMEDIATE");
-  try {
-    await run("UPDATE usuarios SET dinero = dinero - ? WHERE nombre = ?", [
-      cantidad,
-      origen,
-    ]);
-    await run("UPDATE usuarios SET dinero = dinero + ? WHERE nombre = ?", [
-      cantidad,
-      destino,
-    ]);
-    await run("COMMIT");
-  } catch (err) {
-    await run("ROLLBACK");
-    throw err;
-  }
+  // Las dos escrituras van juntas: sin eso, un fallo entre medias haría
+  // desaparecer las monedas del origen sin que llegaran al destino.
+  //
+  // Con `BEGIN IMMEDIATE` a mano ya no bastaba: el cliente de libSQL habla
+  // HTTP y cada sentencia suelta puede ir por una conexión distinta, así que
+  // una transacción abierta con SQL crudo no garantiza nada. `transaccion()`
+  // las manda en un único lote atómico.
+  await transaccion([
+    [
+      "UPDATE usuarios SET dinero = dinero - ? WHERE nombre = ?",
+      [cantidad, origen],
+    ],
+    [
+      "UPDATE usuarios SET dinero = dinero + ? WHERE nombre = ?",
+      [cantidad, destino],
+    ],
+  ]);
 
   return `🎁 ${origen} le regaló ${cantidad}💰 a ${destino}. Le quedan ${formatearDinero(datosOrigen.dinero - cantidad)}💰`;
 }
@@ -253,21 +260,10 @@ export async function robar(ladron, victima) {
   }
 
   const botin = Math.floor(datosVictima.dinero * (0.05 + Math.random() * 0.15));
-  await run("BEGIN IMMEDIATE");
-  try {
-    await run("UPDATE usuarios SET dinero = dinero - ? WHERE nombre = ?", [
-      botin,
-      victima,
-    ]);
-    await run("UPDATE usuarios SET dinero = dinero + ? WHERE nombre = ?", [
-      botin,
-      ladron,
-    ]);
-    await run("COMMIT");
-  } catch (err) {
-    await run("ROLLBACK");
-    throw err;
-  }
+  await transaccion([
+    ["UPDATE usuarios SET dinero = dinero - ? WHERE nombre = ?", [botin, victima]],
+    ["UPDATE usuarios SET dinero = dinero + ? WHERE nombre = ?", [botin, ladron]],
+  ]);
 
   return `🥷 ${ladron} le robó ${botin}💰 a ${victima} y salió corriendo.`;
 }

@@ -6,19 +6,38 @@ Todas las respuestas salen como `text/plain; charset=utf-8` y en una sola línea
 
 ---
 
-## ⚠️ Antes de desplegar: la persistencia no funciona en serverless
+## Persistencia
 
-Los comandos con estado (`!ruleta`, `!duelo`, `!mercado`, `!trabajar`…) guardan monedas y estadísticas en **SQLite sobre disco**. En Vercel —y en cualquier plataforma serverless— el sistema de ficheros es de solo lectura salvo `/tmp`, y **cada instancia tiene su propio `/tmp`, que se destruye sola**.
+Los comandos con estado guardan monedas, inventario, rachas y estadísticas en **libSQL** (`@libsql/client`), que habla el mismo SQL que SQLite.
 
-Consecuencia práctica: en producción el progreso de los usuarios se pierde sin aviso. Los comandos responden, pero las monedas no sobreviven.
+| Entorno | Dónde escribe | Persiste |
+| --- | --- | --- |
+| Local, sin configurar | `./database.db` | Sí, en tu disco |
+| Producción con Turso | `libsql://…` | Sí |
+| Producción sin Turso | fichero efímero | **No** |
 
-Para que la economía funcione de verdad hace falta mover la persistencia a una base de datos externa (Turso/libSQL, Postgres, Redis). Mientras tanto:
+Antes esto usaba `sqlite3` contra un fichero del disco. En Vercel el sistema de ficheros es de solo lectura salvo `/tmp`, que es propio de cada instancia y se destruye sola: con 14 comandos de economía, las monedas y las rachas desaparecían **sin dar ningún error**. Por eso la migración.
 
-- En local funciona bien: `./database.db`.
-- La ruta se puede fijar con la variable `DATABASE_PATH`.
-- Los comandos **sin estado** (los 13 de la primera tabla) funcionan perfectamente en serverless.
+### Configurar Turso
 
----
+```bash
+turso db create twitchcommands
+turso db show twitchcommands            # da la URL libsql://…
+turso db tokens create twitchcommands   # da el token
+```
+
+Y en `.env.local` (y en las variables de entorno de tu despliegue):
+
+```env
+TURSO_DATABASE_URL=libsql://tu-base-tu-org.turso.io
+TURSO_AUTH_TOKEN=eyJhbGci...
+```
+
+**La URL no es secreta; el token sí** — da acceso de escritura. Nunca lo subas al repositorio: `.gitignore` ya cubre `.env*`.
+
+Sin esas dos variables el proyecto arranca igual contra un fichero local, así que se puede desarrollar sin cuenta de Turso. Si falta la configuración **en producción**, se avisa por consola en lugar de fallar en silencio.
+
+Las tablas y sus migraciones se crean solas al arrancar, en Turso o en local.
 
 ## Comandos sin estado
 
@@ -104,7 +123,7 @@ La portada del sitio genera el `!addcom` exacto de cada comando, ya con los par�
 ## Bajo el capó
 
 - **Framework:** Next.js 15 (Pages Router) con React 19.
-- **Persistencia:** SQLite (`sqlite3`). Ver el aviso de arriba.
+- **Persistencia:** libSQL (`@libsql/client`): fichero local en desarrollo, Turso en producción.
 - **UI de la landing:** TailwindCSS 4 + Radix UI.
 - **Estructura:** cada comando es un handler en `pages/api/<comando>.js`; la lógica vive en `utils/` (`functions.js` para usuarios y duelos, `mercado.js`, `economia.js`, `dados.js`) y las respuestas se formatean en `utils/respond.js`.
 
@@ -125,9 +144,11 @@ La base de datos y sus tablas se crean solas al arrancar. `database.db` no se ve
 
 Variables opcionales:
 
-| Variable        | Para qué                                                       |
-| --------------- | -------------------------------------------------------------- |
-| `DATABASE_PATH` | Ruta del fichero SQLite. Por defecto `./database.db`, o `/tmp/database.db` en Vercel. |
+| Variable | Para qué |
+| --- | --- |
+| `TURSO_DATABASE_URL` | Base de Turso. Sin ella se usa un fichero local. |
+| `TURSO_AUTH_TOKEN` | Token de escritura de esa base. **Secreto.** |
+| `DATABASE_PATH` | Ruta del fichero local. Por defecto `./database.db`. |
 
 ---
 
