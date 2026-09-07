@@ -1,6 +1,6 @@
 import { superHeroes } from "@/utils/const";
+import { texto } from "@/utils/respond";
 
 export default function handler(req, res) {
-  const superHero = superHeroes[Math.floor(Math.random() * superHeroes.length)];
-  res.status(200).send(superHero);
+  return texto(res, superHeroes[Math.floor(Math.random() * superHeroes.length)]);
 }

@@ -1,15 +1,15 @@
-import { girarRuleta } from "../../utils/functions";
+import { girarRuleta } from "@/utils/functions";
+import { fallo, parametro, texto, usuarioValido } from "@/utils/respond";
 
 export default async function handler(req, res) {
   try {
-    const usuario = req.query.usuario;
+    const usuario = usuarioValido(parametro(req, "usuario"));
     if (!usuario) {
-      return res.status(400).send("❌ Debes proporcionar un usuario.");
+      return fallo(res, 400, "❌ Falta el usuario. Usa ?usuario=tu_nombre");
     }
-    const resultado = await girarRuleta(usuario);
-    res.status(200).send(resultado);
+    return texto(res, await girarRuleta(usuario));
   } catch (error) {
-    console.error("Error en el endpoint:", error);
-    res.status(500).send("Error interno del servidor");
+    console.error("[ruleta]", error);
+    return fallo(res, 500, "❌ Error interno del servidor");
   }
 }

@@ -1,11 +1,32 @@
 const { premios, eventos, catalogo } = require("./const");
 
+const path = require("node:path");
+
 const sqlite3 = require("sqlite3").verbose();
-const db = new sqlite3.Database("./database.db", (err) => {
+
+/**
+ * Ruta del fichero SQLite.
+ *
+ * Estaba fija en "./database.db", relativa al directorio de trabajo del
+ * proceso. En un despliegue serverless (Vercel) el sistema de ficheros es de
+ * SOLO LECTURA salvo /tmp, asi que ahi cualquier escritura falla: las monedas,
+ * el inventario y los duelos no se guardaban y el endpoint devolvia 500.
+ *
+ * AVISO IMPORTANTE: apuntar a /tmp evita el error, pero NO da persistencia.
+ * Cada instancia serverless tiene su propio /tmp y se destruye sola, asi que
+ * el progreso se pierde. Para que el juego funcione de verdad en produccion
+ * hace falta una base de datos externa (Turso, Postgres, Redis). Esto es una
+ * tirita, no la cura; queda explicado en el README.
+ */
+const DB_PATH =
+  process.env.DATABASE_PATH ||
+  (process.env.VERCEL ? path.join("/tmp", "database.db") : "./database.db");
+
+const db = new sqlite3.Database(DB_PATH, (err) => {
   if (err) {
-    console.error("Error al conectar a la base de datos:", err);
+    console.error(`Error al conectar a la base de datos (${DB_PATH}):`, err);
   } else {
-    console.log("Conectado a la base de datos SQLite");
+    console.log(`Conectado a SQLite en ${DB_PATH}`);
   }
 });
 let cachedOferta;
@@ -47,6 +68,27 @@ db.run(`
         item TEXT,
         cantidad INTEGER DEFAULT 1,
         FOREIGN KEY(usuario) REFERENCES usuarios(nombre)
+    )
+  `);
+
+// El indice que hace posible el ON CONFLICT(usuario, item) del mercado.
+// `inventario` solo tenia `id` como clave primaria, asi que ese ON CONFLICT
+// fallaba con "does not match any PRIMARY KEY or UNIQUE constraint" en cuanto
+// alguien compraba algo. Comprobado sobre database.db: cero indices.
+db.run(`
+    CREATE UNIQUE INDEX IF NOT EXISTS inventario_usuario_item
+        ON inventario (usuario, item)
+  `);
+
+// El mercado inserta y borra en `mascotas`, pero la tabla no se creaba en
+// ningun sitio: cualquier compra de un item con evolucion daba "no such table".
+db.run(`
+    CREATE TABLE IF NOT EXISTS mascotas (
+        usuario TEXT NOT NULL,
+        nombre  TEXT NOT NULL,
+        nivel   INTEGER DEFAULT 1,
+        hambre  INTEGER DEFAULT 100,
+        PRIMARY KEY (usuario, nombre)
     )
   `);
 
@@ -92,9 +134,13 @@ export function obtenerUsuario(nombre) {
             `
                 INSERT INTO usuarios (
                   nombre, dinero, felicidad, salud, social, inteligencia, energia, estres, edad, profesion, diasVividos, ultimoEvento
-                ) VALUES (?, 1000, 50, 50, 50, 50, 100, 0, 18, 'Desempleado', 0, ?)
+                ) VALUES (?, 1000, 50, 50, 50, 50, 100, 0, 18, 'Desempleado', 0, 0)
               `,
-            [nombre, Date.now()],
+            // `ultimoEvento` arranca en 0, no en Date.now(). Con la hora
+            // actual, el usuario recien creado ya estaba en cooldown y su
+            // primer !duelo respondia "espera N minutos": nadie podia
+            // estrenar el comando.
+            [nombre],
             (err) => {
               if (err) {
                 reject(err);
@@ -102,7 +148,12 @@ export function obtenerUsuario(nombre) {
               }
               // Obtener el usuario recién creado
               db.get(
-                "SELECT diasVividos, ultimoEvento, dinero, felicidad, salud, social, inteligencia, energia, estres, edad, profesion FROM usuarios WHERE nombre = ?",
+                // `nombre` faltaba en este SELECT y si estaba en el de
+                // arriba. Resultado: un usuario recien creado volvia sin
+                // nombre, y el duelo narraba "undefined VS undefined". No se
+                // veia porque el cooldown mal calculado impedia que nadie
+                // llegase hasta aqui en su primer duelo.
+                "SELECT nombre, diasVividos, ultimoEvento, dinero, felicidad, salud, social, inteligencia, energia, estres, edad, profesion FROM usuarios WHERE nombre = ?",
                 [nombre],
                 (err, row) => {
                   if (err) {
@@ -156,7 +207,7 @@ export function actualizarUsuario(nombre, datos) {
         nombre,
       ],
       (err) => {
-        if (err) reject(err);
+        if (err) return reject(err);
         else resolve();
       }
     );
@@ -171,25 +222,45 @@ export function generarEvento(profesion) {
   return eventosValidos[Math.floor(Math.random() * eventosValidos.length)];
 }
 
+/**
+ * Monedas del usuario, como NUMERO.
+ *
+ * Antes devolvia el resultado de `formatearDinero`, o sea texto tipo "1.5K", y
+ * quien llamaba lo comparaba con `<`: `"1.5K" < 500` es siempre false porque
+ * compara texto contra numero. Eso dejaba sin efecto la comprobacion de saldo
+ * en los duelos apostados y en las compras del mercado.
+ *
+ * El formateo es cosa de quien muestra el dato, no de quien lo consulta.
+ */
 export async function getMonedas(usuario) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     db.get(
       "SELECT dinero FROM usuarios WHERE nombre = ?",
       [usuario],
       (err, row) => {
-        resolve(formatearDinero(row?.dinero || 0));
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(Number(row?.dinero) || 0);
       }
     );
   });
 }
 
 export async function getEquipo(usuario) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     db.all(
       "SELECT item FROM inventario WHERE usuario = ? AND item LIKE '%(Equipado)'",
       [usuario],
       (err, rows) => {
-        resolve(rows.map((row) => row.item.replace(" (Equipado)", "")));
+        // Sin este control, un error dejaba `rows` en undefined y el `.map`
+        // lanzaba un TypeError dentro del callback, fuera de todo try/catch.
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve((rows || []).map((row) => row.item.replace(" (Equipado)", "")));
       }
     );
   });
@@ -248,72 +319,85 @@ export async function procesarApuesta(usuario, cantidad) {
   });
 }
 
-export async function girarRuleta(usuario) {
+/** Aplica un premio del catalogo sobre la fila del usuario. */
+function aplicarPremio(row, premio) {
+  const acotado = (v) => Math.max(0, Math.min(100, v));
+  return {
+    dinero: (row.dinero || 0) + (premio.dinero || 0),
+    felicidad: acotado((row.felicidad || 0) + (premio.felicidad || 0)),
+    salud: acotado((row.salud || 0) + (premio.salud || 0)),
+    social: acotado((row.social || 0) + (premio.social || 0)),
+    inteligencia: acotado((row.inteligencia || 0) + (premio.inteligencia || 0)),
+    energia: acotado((row.energia || 0) + (premio.energia || 0)),
+    estres: acotado((row.estres || 0) + (premio.estres || 0)),
+    edad: (row.edad || 0) + (premio.edad || 0),
+  };
+}
+
+/** Guarda los stats de un premio ya calculado. */
+function guardarStats(usuario, v) {
   return new Promise((resolve, reject) => {
-    // Seleccionar un premio aleatorio
-    const premio = premios[Math.floor(Math.random() * premios.length)];
-
-    db.get("SELECT * FROM usuarios WHERE nombre = ?", [usuario], (err, row) => {
-      if (err) {
-        console.error(err);
-        reject(new Error("Error interno del servidor."));
-        return;
-      }
-      if (!row) {
-        resolve("❌ Usuario no encontrado.");
-        return;
-      }
-
-      // Calcular los nuevos valores
-      const nuevosValores = {
-        dinero: (row.dinero || 0) + (premio.dinero || 0),
-        felicidad: Math.max(0, (row.felicidad || 0) + (premio.felicidad || 0)),
-        salud: Math.max(0, (row.salud || 0) + (premio.salud || 0)),
-        social: Math.max(0, (row.social || 0) + (premio.social || 0)),
-        inteligencia: Math.max(
-          0,
-          (row.inteligencia || 0) + (premio.inteligencia || 0)
-        ),
-        energia: Math.max(0, (row.energia || 0) + (premio.energia || 0)),
-        estres: Math.max(0, (row.estres || 0) + (premio.estres || 0)),
-        edad: (row.edad || 0) + (premio.edad || 0),
-      };
-
-      // Actualizar los datos en la base de datos
-      db.run(
-        `UPDATE usuarios SET 
-            dinero = ?, felicidad = ?, salud = ?, social = ?, 
-            inteligencia = ?, energia = ?, estres = ?, edad = ?
-            WHERE nombre = ?`,
-        [
-          nuevosValores.dinero,
-          nuevosValores.felicidad,
-          nuevosValores.salud,
-          nuevosValores.social,
-          nuevosValores.inteligencia,
-          nuevosValores.energia,
-          nuevosValores.estres,
-          nuevosValores.edad,
-          usuario,
-        ],
-        (err) => {
-          if (err) {
-            console.error(err);
-            reject(new Error("Error al actualizar los datos."));
-            return;
-          }
-
-          // Construir respuesta con valores modificados
-          let respuesta = premio.mensaje;
-          const cambios = Object.entries(nuevosValores)
-            .map(([stat, valor]) => `${stat}: ${valor}`)
-            .join(" | ");
-
-          resolve(`${respuesta}\n📊 Estado actual: ${cambios}`);
-        }
-      );
-    });
+    db.run(
+      `UPDATE usuarios SET
+          dinero = ?, felicidad = ?, salud = ?, social = ?,
+          inteligencia = ?, energia = ?, estres = ?, edad = ?
+          WHERE nombre = ?`,
+      [
+        v.dinero, v.felicidad, v.salud, v.social,
+        v.inteligencia, v.energia, v.estres, v.edad, usuario,
+      ],
+      (err) => (err ? reject(err) : resolve())
+    );
   });
+}
+
+/**
+ * Solo lo que el premio cambio, no el volcado entero de stats.
+ *
+ * El mensaje va al chat de Twitch, donde caben ~500 caracteres: listar las
+ * ocho estadisticas en cada tirada llenaba la linea de ruido.
+ */
+function resumirCambios(premio, valores) {
+  const tocados = Object.keys(premio).filter((k) => k !== "mensaje");
+  return tocados.map((k) => `${k}: ${valores[k]}`).join(" | ");
+}
+
+export async function girarRuleta(usuario) {
+  const premio = premios[Math.floor(Math.random() * premios.length)];
+
+  // Antes se consultaba la tabla directamente y, si el usuario no existia, se
+  // respondia "Usuario no encontrado" — o sea SIEMPRE para quien tiraba de la
+  // ruleta por primera vez, porque nada lo daba de alta. `obtenerUsuario` lo
+  // crea si hace falta, igual que ya hacia el duelo.
+  const row = await obtenerUsuario(usuario);
+  const valores = aplicarPremio(row, premio);
+  await guardarStats(usuario, valores);
+
+  return `${premio.mensaje} 📊 ${resumirCambios(premio, valores)}`;
+}
+
+/**
+ * Ruleta rusa: aplica el premio de verdad.
+ *
+ * El endpoint calculaba un premio y no lo guardaba nunca, asi que el comando
+ * anunciaba monedas ganadas o perdidas que jamas se movian. Aqui si se
+ * escriben. Al perder se aplica el castigo fijo; al ganar, uno de los premios
+ * con dinero positivo elegido sobre la longitud REAL de la lista (el codigo
+ * anterior sorteaba sobre 3 habiendo solo 2, y un tercio de las victorias
+ * reventaba con `undefined`).
+ */
+export async function aplicarPremioRuletaRusa(usuario, tieneBala) {
+  const candidatos = tieneBala
+    ? premios.filter((p) => (p.dinero || 0) < 0)
+    : premios.filter((p) => (p.dinero || 0) > 0);
+
+  const premio = candidatos[Math.floor(Math.random() * candidatos.length)];
+  const row = await obtenerUsuario(usuario);
+  const valores = aplicarPremio(row, premio);
+  await guardarStats(usuario, valores);
+
+  const cabecera = tieneBala ? "💥 ¡BOOM! Has perdido" : "🎉 ¡Click! Has ganado";
+  return `${cabecera} — ${premio.mensaje}. Saldo: ${formatearDinero(valores.dinero)}`;
 }
 
 // Función separada para manejar la lógica del duelo
@@ -334,14 +418,19 @@ export async function realizarDuelo(retador, retado, monedas) {
       .then((datosRetador) => {
         obtenerUsuario(retado)
           .then((datosRetado) => {
-            const cooldown = 5 * 60 * 100;
-            if (Date.now() - datosRetador.ultimoEvento < cooldown) {
-              const tiempoRestante = Math.ceil(
-                (cooldown - (Date.now() - datosRetador.ultimoEvento)) / 60000
-              );
-              resolve(
-                `❌ ${retador}, espera ${tiempoRestante} minutos para otro duelo.`
-              );
+            // Estaba escrito `5 * 60 * 100` = 30 segundos, mientras el
+            // mensaje hablaba de minutos y dividia entre 60000, con lo que
+            // siempre decia "espera 1 minutos". Ahora la constante y el texto
+            // dicen lo mismo.
+            const COOLDOWN_MS = 5 * 60 * 1000;
+            const transcurrido = Date.now() - datosRetador.ultimoEvento;
+            if (transcurrido < COOLDOWN_MS) {
+              const restanteSeg = Math.ceil((COOLDOWN_MS - transcurrido) / 1000);
+              const espera =
+                restanteSeg >= 60
+                  ? `${Math.ceil(restanteSeg / 60)} min`
+                  : `${restanteSeg} s`;
+              resolve(`❌ ${retador}, espera ${espera} para otro duelo.`);
               return;
             }
 
@@ -417,10 +506,18 @@ function procesarDuelo(datosRetador, datosRetado, monedasApostadas) {
               statsRetado.ataque * (criticoRetado ? 1.5 : 1) -
               statsRetador.defensa * 0.5;
 
+            // El empate se sorteaba a favor del retado, porque `>` lo manda
+            // al `else`. Y el empate NO es raro: dos usuarios nuevos tienen
+            // los mismos stats, asi que el que retaba no podia ganar nunca su
+            // primer duelo. Con stats iguales se decide a cara o cruz.
             const ganador =
-              poderRetador > poderRetado
-                ? datosRetador.nombre
-                : datosRetado.nombre;
+              poderRetador === poderRetado
+                ? Math.random() < 0.5
+                  ? datosRetador.nombre
+                  : datosRetado.nombre
+                : poderRetador > poderRetado
+                  ? datosRetador.nombre
+                  : datosRetado.nombre;
             const perdedor =
               ganador === datosRetador.nombre
                 ? datosRetado.nombre
@@ -442,9 +539,9 @@ function procesarDuelo(datosRetador, datosRetado, monedasApostadas) {
               } (${Math.round(poderRetado)} daño).`,
               `\n🔥 ROUND FINAL:`,
               `¡${ganador} vence con ${
-                poderRetador > poderRetado
-                  ? "poder abrumador"
-                  : "estrategia superior"
+                poderRetador === poderRetado
+                  ? "un desempate de infarto"
+                  : "poder abrumador"
               }!`,
             ];
 
@@ -474,12 +571,12 @@ function procesarDuelo(datosRetador, datosRetado, monedasApostadas) {
                     "UPDATE usuarios SET dinero = dinero + ? WHERE nombre = ?",
                     [monedasApostadas, ganador],
                     (err) => {
-                      if (err) reject(err);
+                      if (err) return reject(err);
                       db.run(
                         "UPDATE usuarios SET dinero = dinero - ? WHERE nombre = ?",
                         [monedasApostadas, perdedor],
                         (err) => {
-                          if (err) reject(err);
+                          if (err) return reject(err);
                           narrativa.push(
                             `\n💰 ${ganador} gana ${monedasApostadas} monedas de ${perdedor}!`
                           );
@@ -511,12 +608,12 @@ function guardarEstadisticasDuelo(ganador, perdedor) {
       "INSERT INTO duelos_stats (usuario, victorias, ultimo_duelo) VALUES (?, 1, CURRENT_TIMESTAMP) ON CONFLICT(usuario) DO UPDATE SET victorias = victorias + 1, ultimo_duelo = CURRENT_TIMESTAMP",
       [ganador],
       (err) => {
-        if (err) reject(err);
+        if (err) return reject(err);
         db.run(
           "INSERT INTO duelos_stats (usuario, derrotas, ultimo_duelo) VALUES (?, 1, CURRENT_TIMESTAMP) ON CONFLICT(usuario) DO UPDATE SET derrotas = derrotas + 1, ultimo_duelo = CURRENT_TIMESTAMP",
           [perdedor],
           (err) => {
-            if (err) reject(err);
+            if (err) return reject(err);
             resolve();
           }
         );
@@ -589,18 +686,18 @@ async function gestionarMercado(usuario, accion, item) {
             "UPDATE usuarios SET dinero = dinero - ? WHERE nombre = ?",
             [datosItem.precio, usuario],
             (err) => {
-              if (err) reject(err);
+              if (err) return reject(err);
               db.run(
                 "INSERT INTO inventario (usuario, item, cantidad) VALUES (?, ?, 1) ON CONFLICT(usuario, item) DO UPDATE SET cantidad = cantidad + 1",
                 [usuario, item],
                 (err) => {
-                  if (err) reject(err);
+                  if (err) return reject(err);
                   if (datosItem.evolucion) {
                     db.run(
                       "INSERT OR IGNORE INTO mascotas (usuario, nombre, nivel, hambre) VALUES (?, ?, 1, 100)",
                       [usuario, item],
                       (err) => {
-                        if (err) reject(err);
+                        if (err) return reject(err);
                         resolve(
                           `✅ ${usuario} compró ${item} por ${datosItem.precio} monedas. ¡Tu mascota está lista!`
                         );
@@ -624,7 +721,7 @@ async function gestionarMercado(usuario, accion, item) {
             "SELECT cantidad FROM inventario WHERE usuario = ? AND item = ?",
             [usuario, item],
             (err, row) => {
-              if (err) reject(err);
+              if (err) return reject(err);
               const cantidad = row?.cantidad || 0;
               if (cantidad < 1) {
                 resolve(`❌ No tienes ${item} en tu inventario.`);
@@ -639,23 +736,23 @@ async function gestionarMercado(usuario, accion, item) {
                 "UPDATE usuarios SET dinero = dinero + ? WHERE nombre = ?",
                 [precioVenta, usuario],
                 (err) => {
-                  if (err) reject(err);
+                  if (err) return reject(err);
                   db.run(
                     "UPDATE inventario SET cantidad = cantidad - 1 WHERE usuario = ? AND item = ?",
                     [usuario, item],
                     (err) => {
-                      if (err) reject(err);
+                      if (err) return reject(err);
                       db.run(
                         "DELETE FROM inventario WHERE usuario = ? AND item = ? AND cantidad <= 0",
                         [usuario, item],
                         (err) => {
-                          if (err) reject(err);
+                          if (err) return reject(err);
                           if (datosItem?.evolucion) {
                             db.run(
                               "DELETE FROM mascotas WHERE usuario = ? AND nombre = ?",
                               [usuario, item],
                               (err) => {
-                                if (err) reject(err);
+                                if (err) return reject(err);
                                 resolve(
                                   `💸 ${usuario} vendió ${item} por ${precioVenta} monedas.`
                                 );
@@ -683,7 +780,7 @@ async function gestionarMercado(usuario, accion, item) {
             "SELECT cantidad FROM inventario WHERE usuario = ? AND item = ?",
             [usuario, item],
             (err, row) => {
-              if (err) reject(err);
+              if (err) return reject(err);
               if (!(row?.cantidad > 0)) {
                 resolve(`❌ No tienes ${item} en tu inventario.`);
                 return;
@@ -713,7 +810,7 @@ async function gestionarMercado(usuario, accion, item) {
                 "SELECT item FROM inventario WHERE usuario = ? AND item LIKE '%(Equipado)'",
                 [usuario],
                 (err, rows) => {
-                  if (err) reject(err);
+                  if (err) return reject(err);
                   rows.forEach((row) => {
                     const nombreBase = row.item.replace(" (Equipado)", "");
                     if (
@@ -725,7 +822,7 @@ async function gestionarMercado(usuario, accion, item) {
                         "UPDATE inventario SET item = ? WHERE usuario = ? AND item = ?",
                         [nombreBase, usuario, row.item],
                         (err) => {
-                          if (err) reject(err);
+                          if (err) return reject(err);
                         }
                       );
                     }
@@ -734,7 +831,7 @@ async function gestionarMercado(usuario, accion, item) {
                     "UPDATE inventario SET item = ? WHERE usuario = ? AND item = ?",
                     [`${item} (Equipado)`, usuario, item],
                     (err) => {
-                      if (err) reject(err);
+                      if (err) return reject(err);
                       resolve(
                         `⚔️ ${usuario} equipó ${item}. ¡Listo para la batalla!`
                       );
@@ -753,7 +850,7 @@ async function gestionarMercado(usuario, accion, item) {
             "SELECT nivel, hambre, ultima_alimentacion FROM mascotas WHERE usuario = ? AND nombre = ?",
             [usuario, item],
             (err, row) => {
-              if (err) reject(err);
+              if (err) return reject(err);
               if (!row) {
                 resolve(`❌ No tienes la mascota ${item}.`);
                 return;
@@ -786,14 +883,14 @@ async function gestionarMercado(usuario, accion, item) {
                     "UPDATE inventario SET item = ? WHERE usuario = ? AND item = ?",
                     [`${evolucion} (Equipado)`, usuario, `${item} (Equipado)`],
                     (err) => {
-                      if (err) reject(err);
+                      if (err) return reject(err);
                     }
                   );
                   db.run(
                     "UPDATE mascotas SET nombre = ? WHERE usuario = ? AND nombre = ?",
                     [evolucion, usuario, item],
                     (err) => {
-                      if (err) reject(err);
+                      if (err) return reject(err);
                     }
                   );
                 }
@@ -803,12 +900,12 @@ async function gestionarMercado(usuario, accion, item) {
                 "UPDATE usuarios SET dinero = dinero - ? WHERE nombre = ?",
                 [costoAlimentacion, usuario],
                 (err) => {
-                  if (err) reject(err);
+                  if (err) return reject(err);
                   db.run(
                     "UPDATE mascotas SET nivel = ?, hambre = ?, ultima_alimentacion = CURRENT_TIMESTAMP WHERE usuario = ? AND nombre = ?",
                     [nivelUp, nuevaHambre, usuario, item],
                     (err) => {
-                      if (err) reject(err);
+                      if (err) return reject(err);
                       resolve(
                         `🍖 ${usuario} alimentó a ${item} por ${costoAlimentacion} monedas. Hambre: ${nuevaHambre}%${
                           evolucion

@@ -1,13 +1,22 @@
-import { realizarDuelo } from "../../utils/functions";
+import { realizarDuelo } from "@/utils/functions";
+import { fallo, parametro, texto, usuarioValido } from "@/utils/respond";
 
 export default async function handler(req, res) {
   try {
-    const { retador, retado, monedas } = req.query;
+    const retador = usuarioValido(parametro(req, "retador"));
+    const retado = usuarioValido(parametro(req, "retado"));
 
-    const resultado = await realizarDuelo(retador, retado, monedas);
-    res.status(200).send(resultado);
+    // La validacion vive aqui y no dentro de `realizarDuelo` para que el
+    // endpoint responda 400 ante una peticion mal formada, en vez de 200 con
+    // un texto de error: asi el fallo se distingue en los registros.
+    if (!retador || !retado) {
+      return fallo(res, 400, "❌ Uso: !duelo @usuario (faltan retador o retado)");
+    }
+
+    const monedas = parametro(req, "monedas");
+    return texto(res, await realizarDuelo(retador, retado, monedas));
   } catch (error) {
-    console.error("Error en el endpoint:", error);
-    res.status(500).send("Error interno del servidor");
+    console.error("[duelo]", error);
+    return fallo(res, 500, "❌ Error interno del servidor");
   }
 }

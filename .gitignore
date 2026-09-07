@@ -39,3 +39,11 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# base de datos local
+# SQLite es estado de ejecucion, no codigo fuente: versionarla hacia que cada
+# clon arrastrara las monedas y el inventario de otra maquina, y cada partida
+# ensuciara el diff. Las tablas se crean solas al arrancar.
+*.db
+*.db-journal
+*.sqlite

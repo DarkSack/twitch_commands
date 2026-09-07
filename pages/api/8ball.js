@@ -1,5 +1,6 @@
 import { respuesta } from "@/utils/const";
+import { texto } from "@/utils/respond";
 
 export default function handler(req, res) {
-  res.status(200).send(respuesta[Math.floor(Math.random() * respuesta.length)]);
+  return texto(res, respuesta[Math.floor(Math.random() * respuesta.length)]);
 }

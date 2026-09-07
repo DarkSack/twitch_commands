@@ -1,6 +1,6 @@
 import { animales } from "@/utils/const";
+import { texto } from "@/utils/respond";
 
 export default function handler(req, res) {
-  const animal = animales[Math.floor(Math.random() * animales.length)];
-  res.status(200).send(animal);
+  return texto(res, animales[Math.floor(Math.random() * animales.length)]);
 }

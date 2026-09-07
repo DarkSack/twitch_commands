@@ -1,12 +1,10 @@
 import { adivinanzas } from "@/utils/const";
+import { texto } from "@/utils/respond";
 
 export default function handler(req, res) {
-  // Ejemplo: devolver una adivinanza aleatoria
   const random = adivinanzas[Math.floor(Math.random() * adivinanzas.length)];
-
-  res.status(200).json({
-    pregunta: random.pregunta,
-    respuesta: random.respuesta,
-    pista: random.pista,
-  });
+  // Antes devolvia JSON, que el bot pegaba crudo en el chat con llaves y
+  // comillas. La respuesta no se incluye: es una adivinanza, se resuelve
+  // con `!adivinanza pista` o la dice el streamer.
+  return texto(res, `🤔 ${random.pregunta} (pista: ${random.pista})`);
 }

@@ -1,6 +1,6 @@
 import { cumplidos } from "@/utils/const";
+import { texto } from "@/utils/respond";
 
 export default function handler(req, res) {
-  const cumplido = cumplidos[Math.floor(Math.random() * cumplidos.length)];
-  res.status(200).send(cumplido);
+  return texto(res, cumplidos[Math.floor(Math.random() * cumplidos.length)]);
 }
