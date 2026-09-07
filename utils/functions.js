@@ -29,6 +29,35 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
     console.log(`Conectado a SQLite en ${DB_PATH}`);
   }
 });
+/* ── SQLite con promesas ───────────────────────────────────────────
+   El codigo original encadenaba callbacks a cuatro y cinco niveles, que es
+   de donde salieron la mitad de los fallos (rechazos sin return, errores
+   ignorados). Todo lo nuevo va contra estos tres envoltorios. */
+
+export async function run(sql, params = []) {
+  await esquemaListo;
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function (err) {
+      if (err) return reject(err);
+      resolve(this);
+    });
+  });
+}
+
+export async function get(sql, params = []) {
+  await esquemaListo;
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row)));
+  });
+}
+
+export async function all(sql, params = []) {
+  await esquemaListo;
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+  });
+}
+
 let cachedOferta;
 let cachedFecha;
 export function formatearDinero(cantidad) {
@@ -42,80 +71,124 @@ export function formatearDinero(cantidad) {
   return cantidad.toString(); // Si es menor a 1000, no cambia
 }
 
-// Crear tabla de usuarios si no existe
-db.run(`
-    CREATE TABLE IF NOT EXISTS usuarios (
-        nombre TEXT PRIMARY KEY,
-        dinero INTEGER DEFAULT 1000,
-        felicidad INTEGER DEFAULT 50,
-        salud INTEGER DEFAULT 50,
-        social INTEGER DEFAULT 50,
-        inteligencia INTEGER DEFAULT 50,
-        energia INTEGER DEFAULT 100,
-        estres INTEGER DEFAULT 0,
-        edad INTEGER DEFAULT 18,
-        profesion TEXT DEFAULT 'Desempleado',
-        diasVividos INTEGER DEFAULT 0,
-        ultimoEvento INTEGER DEFAULT 0
-    )
-  `);
+/* ── Esquema ───────────────────────────────────────────────────────
+   TODO va dentro de un unico `db.serialize()` y detras de la promesa
+   `esquemaListo`.
 
-// Crear tabla de inventario
-db.run(`
-    CREATE TABLE IF NOT EXISTS inventario (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        usuario TEXT,
-        item TEXT,
-        cantidad INTEGER DEFAULT 1,
-        FOREIGN KEY(usuario) REFERENCES usuarios(nombre)
-    )
-  `);
+   Antes eran `db.run(...)` sueltos al cargar el modulo. El driver de sqlite3
+   NO serializa por defecto, asi que el `ALTER TABLE inventario` se ejecutaba
+   antes que su `CREATE TABLE` y moria con "no such table: inventario"; el
+   indice unico y la migracion de `equipado` se perdian con el. Ademas la
+   primera peticion podia llegar antes de que existiera ninguna tabla.
 
-// El indice que hace posible el ON CONFLICT(usuario, item) del mercado.
-// `inventario` solo tenia `id` como clave primaria, asi que ese ON CONFLICT
-// fallaba con "does not match any PRIMARY KEY or UNIQUE constraint" en cuanto
-// alguien compraba algo. Comprobado sobre database.db: cero indices.
-db.run(`
-    CREATE UNIQUE INDEX IF NOT EXISTS inventario_usuario_item
-        ON inventario (usuario, item)
-  `);
+   Los helpers `run`/`get`/`all` esperan a `esquemaListo`, asi que a partir de
+   aqui nada consulta una tabla que todavia no existe. */
 
-// El mercado inserta y borra en `mascotas`, pero la tabla no se creaba en
-// ningun sitio: cualquier compra de un item con evolucion daba "no such table".
-db.run(`
-    CREATE TABLE IF NOT EXISTS mascotas (
-        usuario TEXT NOT NULL,
-        nombre  TEXT NOT NULL,
-        nivel   INTEGER DEFAULT 1,
-        hambre  INTEGER DEFAULT 100,
-        PRIMARY KEY (usuario, nombre)
-    )
-  `);
+export const esquemaListo = new Promise((resolve, reject) => {
+  db.serialize(() => {
+    db.run(`
+      CREATE TABLE IF NOT EXISTS usuarios (
+          nombre TEXT PRIMARY KEY,
+          dinero INTEGER DEFAULT 1000,
+          felicidad INTEGER DEFAULT 50,
+          salud INTEGER DEFAULT 50,
+          social INTEGER DEFAULT 50,
+          inteligencia INTEGER DEFAULT 50,
+          energia INTEGER DEFAULT 100,
+          estres INTEGER DEFAULT 0,
+          edad INTEGER DEFAULT 18,
+          profesion TEXT DEFAULT 'Desempleado',
+          diasVividos INTEGER DEFAULT 0,
+          ultimoEvento INTEGER DEFAULT 0
+      )`);
 
-db.serialize(() => {
-  // Tabla de estadísticas de duelos
-  db.run(`CREATE TABLE IF NOT EXISTS duelos_stats (
-            usuario TEXT PRIMARY KEY,
-            victorias INTEGER DEFAULT 0,
-            derrotas INTEGER DEFAULT 0,
-            monedas_ganadas INTEGER DEFAULT 0,
-            ultimo_duelo TIMESTAMP
-        )`);
+    db.run(`
+      CREATE TABLE IF NOT EXISTS inventario (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          usuario TEXT,
+          item TEXT,
+          cantidad INTEGER DEFAULT 1,
+          FOREIGN KEY(usuario) REFERENCES usuarios(nombre)
+      )`);
 
-  // Tabla de historial de duelos
-  db.run(`CREATE TABLE IF NOT EXISTS duelos_historial (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            retador TEXT,
-            retado TEXT,
-            ganador TEXT,
-            tipo_victoria TEXT,
-            monedas_apostadas INTEGER,
-            fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`);
+    // Estar equipado se guardaba renombrando la fila a "Espada (Equipado)".
+    // Eso rompia el ON CONFLICT (para SQLite son dos items distintos),
+    // duplicaba filas al comprar una segunda copia, y se corrompia con
+    // cualquier item cuyo nombre llevara ese sufijo. Ahora es una columna.
+    db.run("ALTER TABLE inventario ADD COLUMN equipado INTEGER DEFAULT 0", (err) => {
+      // "duplicate column" solo significa que ya se migro antes.
+      if (err && !/duplicate column/i.test(err.message)) {
+        console.error("Migracion inventario.equipado:", err.message);
+      }
+    });
+    db.run(
+      "UPDATE inventario SET equipado = 1, item = REPLACE(item, ' (Equipado)', '') WHERE item LIKE '%(Equipado)'"
+    );
+
+    // Sin este indice, el ON CONFLICT(usuario, item) del mercado fallaba con
+    // "does not match any PRIMARY KEY or UNIQUE constraint". Se limpian antes
+    // los duplicados que pudieran existir, o la creacion del indice falla.
+    db.run(`
+      DELETE FROM inventario WHERE id NOT IN (
+        SELECT MIN(id) FROM inventario GROUP BY usuario, item
+      )`);
+    db.run(`
+      CREATE UNIQUE INDEX IF NOT EXISTS inventario_usuario_item
+          ON inventario (usuario, item)`);
+
+    // El mercado inserta y borra en `mascotas`, y la tabla no se creaba en
+    // ningun sitio: comprar un item con evolucion daba "no such table".
+    db.run(`
+      CREATE TABLE IF NOT EXISTS mascotas (
+          usuario TEXT NOT NULL,
+          nombre  TEXT NOT NULL,
+          nivel   INTEGER DEFAULT 1,
+          hambre  INTEGER DEFAULT 100,
+          PRIMARY KEY (usuario, nombre)
+      )`);
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS duelos_stats (
+          usuario TEXT PRIMARY KEY,
+          victorias INTEGER DEFAULT 0,
+          derrotas INTEGER DEFAULT 0,
+          monedas_ganadas INTEGER DEFAULT 0,
+          ultimo_duelo TIMESTAMP
+      )`);
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS duelos_historial (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          retador TEXT,
+          retado TEXT,
+          ganador TEXT,
+          tipo_victoria TEXT,
+          monedas_apostadas INTEGER,
+          fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`);
+
+    // Columnas de los comandos de economia. Van aqui, en el mismo bloque
+    // serializado, para que no vuelvan a correr contra tablas inexistentes.
+    for (const [columna, tipo] of [
+      ["ultimoTrabajo", "INTEGER DEFAULT 0"],
+      ["ultimaRecompensa", "INTEGER DEFAULT 0"],
+      ["racha", "INTEGER DEFAULT 0"],
+    ]) {
+      db.run(`ALTER TABLE usuarios ADD COLUMN ${columna} ${tipo}`, (err) => {
+        if (err && !/duplicate column/i.test(err.message)) {
+          console.error(`Migracion usuarios.${columna}:`, err.message);
+        }
+      });
+    }
+
+    // Marca el final de la cola: al ejecutarse, todo lo anterior ya corrio.
+    db.run("SELECT 1", (err) => (err ? reject(err) : resolve()));
+  });
 });
 
 //Funciones 🛠️
-export function obtenerUsuario(nombre) {
+export async function obtenerUsuario(nombre) {
+  await esquemaListo;
   return new Promise((resolve, reject) => {
     db.get(
       "SELECT nombre, diasVividos, ultimoEvento, dinero, felicidad, salud, social, inteligencia, energia, estres, edad, profesion FROM usuarios WHERE nombre = ?",
@@ -172,7 +245,8 @@ export function obtenerUsuario(nombre) {
 }
 
 // Función para actualizar usuario
-export function actualizarUsuario(nombre, datos) {
+export async function actualizarUsuario(nombre, datos) {
+  await esquemaListo;
   return new Promise((resolve, reject) => {
     const query = `
             UPDATE usuarios SET
@@ -249,21 +323,11 @@ export async function getMonedas(usuario) {
 }
 
 export async function getEquipo(usuario) {
-  return new Promise((resolve, reject) => {
-    db.all(
-      "SELECT item FROM inventario WHERE usuario = ? AND item LIKE '%(Equipado)'",
-      [usuario],
-      (err, rows) => {
-        // Sin este control, un error dejaba `rows` en undefined y el `.map`
-        // lanzaba un TypeError dentro del callback, fuera de todo try/catch.
-        if (err) {
-          reject(err);
-          return;
-        }
-        resolve((rows || []).map((row) => row.item.replace(" (Equipado)", "")));
-      }
-    );
-  });
+  const filas = await all(
+    "SELECT item FROM inventario WHERE usuario = ? AND equipado = 1 AND cantidad > 0",
+    [usuario]
+  );
+  return filas.map((f) => f.item);
 }
 
 // Función separada para manejar la lógica de apostar
@@ -622,312 +686,6 @@ function guardarEstadisticasDuelo(ganador, perdedor) {
   });
 }
 
-async function gestionarMercado(usuario, accion, item) {
-  return new Promise((resolve, reject) => {
-    if (!usuario) {
-      resolve("❌ Debes especificar un usuario con ?usuario=tu_nombre.");
-      return;
-    }
-
-    const hoy = new Date().toISOString().split("T")[0];
-
-    if (!cachedOferta || cachedFecha !== hoy) {
-      const items = Object.values(catalogo).flatMap(Object.entries);
-      const probabilidades = {
-        Común: 0.5,
-        Raro: 0.3,
-        Épico: 0.15,
-        Legendario: 0.05,
-      };
-
-      let seleccionados = [];
-      while (seleccionados.length < 5) {
-        const idx = Math.floor(Math.random() * items.length);
-        const [nombre, datos] = items[idx];
-
-        if (
-          Math.random() < probabilidades[datos.rareza] &&
-          !seleccionados.some((i) => i.nombre === nombre)
-        ) {
-          seleccionados.push({ nombre, ...datos });
-        }
-      }
-
-      cachedOferta = seleccionados;
-      cachedFecha = hoy;
-    }
-
-    getMonedas(usuario)
-      .then((monedasUsuario) => {
-        if (!accion || accion === "ver") {
-          const lista = cachedOferta
-            .map(
-              (i) =>
-                `✦${i.nombre} (${i.rareza}) - ${i.precio} monedas | Atk: ${i.ataque}, Def: ${i.defensa}, Luck: ${i.suerte}✦`
-            )
-            .join("\n");
-          resolve(
-            `🏬 MERCADO ÉPICO - ${hoy} 🏬\n\n${lista}\n\n💰 Tienes ${monedasUsuario} monedas.`
-          );
-        } else if (accion === "comprar") {
-          const datosItem = cachedOferta.find((i) => i.nombre === item);
-          if (!datosItem) {
-            resolve("❌ Item no disponible hoy. Usa !mercado.");
-            return;
-          }
-          if (monedasUsuario < datosItem.precio) {
-            resolve(
-              `❌ No tienes suficientes monedas (${monedasUsuario}/${datosItem.precio}).`
-            );
-            return;
-          }
-
-          db.run(
-            "UPDATE usuarios SET dinero = dinero - ? WHERE nombre = ?",
-            [datosItem.precio, usuario],
-            (err) => {
-              if (err) return reject(err);
-              db.run(
-                "INSERT INTO inventario (usuario, item, cantidad) VALUES (?, ?, 1) ON CONFLICT(usuario, item) DO UPDATE SET cantidad = cantidad + 1",
-                [usuario, item],
-                (err) => {
-                  if (err) return reject(err);
-                  if (datosItem.evolucion) {
-                    db.run(
-                      "INSERT OR IGNORE INTO mascotas (usuario, nombre, nivel, hambre) VALUES (?, ?, 1, 100)",
-                      [usuario, item],
-                      (err) => {
-                        if (err) return reject(err);
-                        resolve(
-                          `✅ ${usuario} compró ${item} por ${datosItem.precio} monedas. ¡Tu mascota está lista!`
-                        );
-                      }
-                    );
-                  } else {
-                    resolve(
-                      `✅ ${usuario} compró ${item} por ${datosItem.precio} monedas.`
-                    );
-                  }
-                }
-              );
-            }
-          );
-        } else if (accion === "vender") {
-          if (!item) {
-            resolve("❌ Especifica un item.");
-            return;
-          }
-          db.get(
-            "SELECT cantidad FROM inventario WHERE usuario = ? AND item = ?",
-            [usuario, item],
-            (err, row) => {
-              if (err) return reject(err);
-              const cantidad = row?.cantidad || 0;
-              if (cantidad < 1) {
-                resolve(`❌ No tienes ${item} en tu inventario.`);
-                return;
-              }
-
-              const datosItem = Object.values(catalogo)
-                .flatMap((cat) => Object.entries(cat))
-                .find(([n]) => n === item)?.[1];
-              const precioVenta = datosItem?.precio * 0.5 || 50;
-              db.run(
-                "UPDATE usuarios SET dinero = dinero + ? WHERE nombre = ?",
-                [precioVenta, usuario],
-                (err) => {
-                  if (err) return reject(err);
-                  db.run(
-                    "UPDATE inventario SET cantidad = cantidad - 1 WHERE usuario = ? AND item = ?",
-                    [usuario, item],
-                    (err) => {
-                      if (err) return reject(err);
-                      db.run(
-                        "DELETE FROM inventario WHERE usuario = ? AND item = ? AND cantidad <= 0",
-                        [usuario, item],
-                        (err) => {
-                          if (err) return reject(err);
-                          if (datosItem?.evolucion) {
-                            db.run(
-                              "DELETE FROM mascotas WHERE usuario = ? AND nombre = ?",
-                              [usuario, item],
-                              (err) => {
-                                if (err) return reject(err);
-                                resolve(
-                                  `💸 ${usuario} vendió ${item} por ${precioVenta} monedas.`
-                                );
-                              }
-                            );
-                          } else {
-                            resolve(
-                              `💸 ${usuario} vendió ${item} por ${precioVenta} monedas.`
-                            );
-                          }
-                        }
-                      );
-                    }
-                  );
-                }
-              );
-            }
-          );
-        } else if (accion === "equipar") {
-          if (!item) {
-            resolve("❌ Especifica un item.");
-            return;
-          }
-          db.get(
-            "SELECT cantidad FROM inventario WHERE usuario = ? AND item = ?",
-            [usuario, item],
-            (err, row) => {
-              if (err) return reject(err);
-              if (!(row?.cantidad > 0)) {
-                resolve(`❌ No tienes ${item} en tu inventario.`);
-                return;
-              }
-
-              const datosItem = Object.values(catalogo)
-                .flatMap((cat) => Object.entries(cat))
-                .find(([n]) => n === item)?.[1];
-              if (
-                !datosItem ||
-                ![
-                  "armas",
-                  "armaduras",
-                  "amuletos",
-                  "accesorios",
-                  "mascotas",
-                ].some((cat) => catalogo[cat][item])
-              ) {
-                resolve("❌ Este item no se puede equipar.");
-                return;
-              }
-              const tipo = Object.keys(catalogo)
-                .find((cat) => catalogo[cat][item])
-                ?.replace("s", "");
-
-              db.all(
-                "SELECT item FROM inventario WHERE usuario = ? AND item LIKE '%(Equipado)'",
-                [usuario],
-                (err, rows) => {
-                  if (err) return reject(err);
-                  rows.forEach((row) => {
-                    const nombreBase = row.item.replace(" (Equipado)", "");
-                    if (
-                      Object.keys(catalogo).find(
-                        (cat) => catalogo[cat][nombreBase]?.tipo === tipo
-                      )
-                    ) {
-                      db.run(
-                        "UPDATE inventario SET item = ? WHERE usuario = ? AND item = ?",
-                        [nombreBase, usuario, row.item],
-                        (err) => {
-                          if (err) return reject(err);
-                        }
-                      );
-                    }
-                  });
-                  db.run(
-                    "UPDATE inventario SET item = ? WHERE usuario = ? AND item = ?",
-                    [`${item} (Equipado)`, usuario, item],
-                    (err) => {
-                      if (err) return reject(err);
-                      resolve(
-                        `⚔️ ${usuario} equipó ${item}. ¡Listo para la batalla!`
-                      );
-                    }
-                  );
-                }
-              );
-            }
-          );
-        } else if (accion === "alimentar") {
-          if (!item) {
-            resolve("❌ Especifica una mascota.");
-            return;
-          }
-          db.get(
-            "SELECT nivel, hambre, ultima_alimentacion FROM mascotas WHERE usuario = ? AND nombre = ?",
-            [usuario, item],
-            (err, row) => {
-              if (err) return reject(err);
-              if (!row) {
-                resolve(`❌ No tienes la mascota ${item}.`);
-                return;
-              }
-              const datosMascota = row;
-              const tiempoDesdeAlimentacion =
-                Date.now() -
-                new Date(datosMascota.ultima_alimentacion).getTime();
-              if (tiempoDesdeAlimentacion < 86400000) {
-                resolve(`❌ Solo puedes alimentar a ${item} una vez al día.`);
-                return;
-              }
-
-              const costoAlimentacion = datosMascota.nivel * 50;
-              if (monedasUsuario < costoAlimentacion) {
-                resolve(
-                  `❌ Necesitas ${costoAlimentacion} monedas para alimentar a ${item}.`
-                );
-                return;
-              }
-
-              const nuevaHambre = Math.min(100, datosMascota.hambre + 50);
-              let nivelUp = datosMascota.nivel;
-              let evolucion = "";
-              if (nuevaHambre >= 100 && datosMascota.nivel < 3) {
-                nivelUp++;
-                if (catalogo.mascotas[item]?.evolucion) {
-                  evolucion = catalogo.mascotas[item].evolucion;
-                  db.run(
-                    "UPDATE inventario SET item = ? WHERE usuario = ? AND item = ?",
-                    [`${evolucion} (Equipado)`, usuario, `${item} (Equipado)`],
-                    (err) => {
-                      if (err) return reject(err);
-                    }
-                  );
-                  db.run(
-                    "UPDATE mascotas SET nombre = ? WHERE usuario = ? AND nombre = ?",
-                    [evolucion, usuario, item],
-                    (err) => {
-                      if (err) return reject(err);
-                    }
-                  );
-                }
-              }
-
-              db.run(
-                "UPDATE usuarios SET dinero = dinero - ? WHERE nombre = ?",
-                [costoAlimentacion, usuario],
-                (err) => {
-                  if (err) return reject(err);
-                  db.run(
-                    "UPDATE mascotas SET nivel = ?, hambre = ?, ultima_alimentacion = CURRENT_TIMESTAMP WHERE usuario = ? AND nombre = ?",
-                    [nivelUp, nuevaHambre, usuario, item],
-                    (err) => {
-                      if (err) return reject(err);
-                      resolve(
-                        `🍖 ${usuario} alimentó a ${item} por ${costoAlimentacion} monedas. Hambre: ${nuevaHambre}%${
-                          evolucion
-                            ? `\n🌟 ¡${item} evolucionó a ${evolucion}!`
-                            : ""
-                        }`
-                      );
-                    }
-                  );
-                }
-              );
-            }
-          );
-        } else {
-          resolve(
-            "❌ Acción no válida. Usa ?accion=ver/comprar/vender/equipar/alimentar"
-          );
-        }
-      })
-      .catch((err) => reject(err));
-  });
-}
 export const getEmoji = (size) => {
   if (size < 2) return "💀"; // Muy pequeño
   if (size < 5) return "😢"; // Pequeño
