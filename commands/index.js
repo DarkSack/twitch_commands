@@ -153,7 +153,10 @@ export function porGrupo(lista = comandosPublicos) {
  * comandos que piden más de un dato del chat, todo va en `q` y es el endpoint
  * quien lo parte.
  */
-export function ejemploNightbot(comando, base = "https://twitchcomm.vercel.app") {
+export const BASE_URL =
+  process.env.NEXT_PUBLIC_BASE_URL ?? "https://twitch.sackito.online";
+
+export function ejemploNightbot(comando, base = BASE_URL) {
   const DEL_BOT = new Set(["usuario", "retador"]);
   const partes = [];
   let libres = 0;

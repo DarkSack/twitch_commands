@@ -12,10 +12,9 @@
  * páginas y podía purgarlas.
  */
 const config = {
-  content: [
-    "./pages/**/*.{js,ts,jsx,tsx,mdx}",
-    "./components/**/*.{js,ts,jsx,tsx,mdx}",
-  ],
+  // Ya no hay `components/`: el escaparate se separó a twitch-commands-web y
+  // aquí sólo queda la portada mínima que apunta a él.
+  content: ["./pages/**/*.{js,ts,jsx,tsx,mdx}"],
   theme: {},
 };
 

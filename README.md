@@ -43,9 +43,11 @@ Las tablas y sus migraciones se crean solas al arrancar, en Turso o en local.
 
 ## Comandos públicos
 
-Los 40 de aquí **no tocan la base de datos**: son funciones puras que reciben texto y devuelven texto. Son los únicos que se anuncian en [la portada](https://twitchcomm.vercel.app) y los únicos que devuelve `/api/comandos`.
+Los 40 de aquí **no tocan la base de datos**: son funciones puras que reciben texto y devuelven texto. Son los únicos que se anuncian en [la portada](https://comandos.sackito.online) y los únicos que devuelve `/api/comandos`.
 
 `/api/comandos` sin argumento lista los grupos; con uno (`/api/comandos?grupo=medidor`) lista ese grupo. La lista entera no cabe en los 480 caracteres de un mensaje de Twitch.
+
+Para consumo por máquina existe además **`/api/comandos.json`**, que devuelve el catálogo completo agrupado y con el `!addcom` de cada comando ya montado. Es lo que lee la portada al compilarse; `/api/comandos` seguirá devolviendo texto plano porque lo pega un bot en el chat.
 
 Los medidores (`!amor`, `!iq`, `!suerte`, `!simp`, `!cordura`, `!ship`, `!nombrerpg`, `!tarot`, `!horoscopo`) usan un **hash estable**, no `Math.random()`: el mismo nombre da siempre el mismo resultado. Con azar puro el chat repite el comando hasta que sale el número que le gusta y la broma se muere. Los que llevan "de hoy" cambian con la fecha; el resto no cambian nunca.
 
@@ -164,29 +166,29 @@ Los nombres se buscan **sin distinguir mayúsculas ni tildes**: `!mercado compra
 ### Nightbot
 
 ```
-!addcom !ruleta $(urlfetch https://twitchcomm.vercel.app/api/ruleta?usuario=$(user))
+!addcom !ruleta $(urlfetch https://twitch.sackito.online/api/ruleta?usuario=$(user))
 ```
 
 ### StreamElements
 
 ```
-!command add ruleta ${urlfetch https://twitchcomm.vercel.app/api/ruleta?usuario=${user}}
+!command add ruleta ${urlfetch https://twitch.sackito.online/api/ruleta?usuario=${user}}
 ```
 
 ### Botrix
 
 ```
-!custom add ruleta ${webhook:https://twitchcomm.vercel.app/api/ruleta?usuario=${sender}}
+!custom add ruleta ${webhook:https://twitch.sackito.online/api/ruleta?usuario=${sender}}
 ```
 
-La portada del sitio genera el `!addcom` exacto de cada comando, ya con los parámetros correctos.
+La [portada](https://comandos.sackito.online) genera el `!addcom` exacto de cada comando, ya con los parámetros correctos. Vive en un repositorio aparte ([twitch-commands-web](https://github.com/DarkSack/twitch-commands-web)) y lee el catálogo de este por `/api/comandos.json`, así que no hay dos listas que mantener.
 
 **Ojo con los comandos de varios datos.** Nightbot solo tiene una variable para el resto del mensaje, `$(querystring)`. Repartirla entre dos parámetros la duplica: `!mercado comprar Hacha` acabaría mandando `accion=comprar Hacha&item=comprar Hacha`. Por eso esos comandos aceptan todo junto en `q` y lo parten en el servidor:
 
 ```
-!addcom !mercado $(urlfetch https://twitchcomm.vercel.app/api/mercado?usuario=$(user)&q=$(querystring))
-!addcom !duelo   $(urlfetch https://twitchcomm.vercel.app/api/duelo?retador=$(user)&q=$(querystring))
-!addcom !regalar $(urlfetch https://twitchcomm.vercel.app/api/regalar?usuario=$(user)&q=$(querystring))
+!addcom !mercado $(urlfetch https://twitch.sackito.online/api/mercado?usuario=$(user)&q=$(querystring))
+!addcom !duelo   $(urlfetch https://twitch.sackito.online/api/duelo?retador=$(user)&q=$(querystring))
+!addcom !regalar $(urlfetch https://twitch.sackito.online/api/regalar?usuario=$(user)&q=$(querystring))
 ```
 
 ---
