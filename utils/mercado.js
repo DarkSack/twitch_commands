@@ -185,8 +185,13 @@ async function vender(usuario, nombreItem) {
     precio,
     usuario,
   ]);
+  // Solo baja la cantidad. NO se pone `equipado = 0`: si tienes dos y vendes
+  // una, te queda una y seguirla llevando puesta es lo esperado. Comprobado
+  // contra Turso: con `equipado = 0` el perfil pasaba a "Equipado: nada"
+  // teniendo el item todavia en el inventario. Cuando la ultima unidad se va,
+  // la fila entera se borra justo debajo, asi que el flag se va con ella.
   await run(
-    "UPDATE inventario SET cantidad = cantidad - 1, equipado = 0 WHERE usuario = ? AND item = ?",
+    "UPDATE inventario SET cantidad = cantidad - 1 WHERE usuario = ? AND item = ?",
     [usuario, item.nombre]
   );
   await run(
