@@ -50,11 +50,10 @@ export function CommandCard({ comando }) {
             {comando.params.join(" ")}
           </span>
         )}
-        {comando.estado && (
-          <span className="ml-auto rounded-full bg-acento-tenue px-2 py-0.5 text-[0.65rem] font-medium tracking-wide text-acento-fuerte uppercase">
-            guarda datos
-          </span>
-        )}
+        {/* Antes había aquí una etiqueta "guarda datos" para los comandos con
+            estado. Se ha quitado porque la portada ya sólo pinta los públicos,
+            que por definición no tienen estado: la condición era siempre falsa
+            y la etiqueta no se pintaba nunca. */}
       </div>
 
       <p className="text-sm leading-relaxed text-texto-suave">

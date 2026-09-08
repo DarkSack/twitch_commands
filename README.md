@@ -4,6 +4,8 @@ Colección de **endpoints HTTP** listos para conectarse a bots de chat de Twitch
 
 Todas las respuestas salen como `text/plain; charset=utf-8` y en una sola línea, que es lo que los bots saben pegar en el chat.
 
+**55 comandos, en dos grupos:** 40 [públicos](#comandos-públicos), que no tocan la base de datos y se anuncian en la portada, y 15 [con estado](#comandos-con-estado) —la economía del canal—, que existen pero sólo se documentan aquí.
+
 ---
 
 ## Persistencia
@@ -39,31 +41,100 @@ Sin esas dos variables el proyecto arranca igual contra un fichero local, así q
 
 Las tablas y sus migraciones se crean solas al arrancar, en Turso o en local.
 
-## Comandos sin estado
+## Comandos públicos
 
-Funcionan en cualquier sitio, no tocan la base de datos.
+Los 40 de aquí **no tocan la base de datos**: son funciones puras que reciben texto y devuelven texto. Son los únicos que se anuncian en [la portada](https://twitchcomm.vercel.app) y los únicos que devuelve `/api/comandos`.
 
-| Comando       | Endpoint              | Qué devuelve                                          |
-| ------------- | --------------------- | ----------------------------------------------------- |
-| `!8ball`      | `/api/8ball`          | Una respuesta de bola 8 mágica.                       |
-| `!adivinanza` | `/api/adivinanza`     | Una adivinanza con su pista.                          |
-| `!animal`     | `/api/animal`         | Un animal inventado, en texto. No hay imagen.         |
-| `!catalogo`   | `/api/catalogo?categoria=` | Los items que existen, por categoría.            |
-| `!comandos`   | `/api/comandos`       | La lista de comandos.                                 |
-| `!cumplido`   | `/api/cumplido`       | Un cumplido al azar.                                  |
-| `!dado`       | `/api/dado?tirada=`   | Tira dados: `!dado`, `!dado d20`, `!dado 2d6+3`.      |
-| `!facha`      | `/api/facha`          | Un porcentaje de "facha". Texto, no imagen.           |
-| `!factos`     | `/api/factos`         | Un dato curioso.                                       |
-| `!flip`       | `/api/flip`           | Cara o cruz.                                           |
-| `!insulto`    | `/api/insulto`        | Un "insulto" en tono cómico.                          |
-| `!memide`     | `/api/memide`         | Una medida en cm con emoji. Texto, no imagen.         |
-| `!superhero`  | `/api/superhero`      | Un superhéroe inventado.                              |
+`/api/comandos` sin argumento lista los grupos; con uno (`/api/comandos?grupo=medidor`) lista ese grupo. La lista entera no cabe en los 480 caracteres de un mensaje de Twitch.
 
-`!dice` pasó a llamarse **`!dado`**, y ahora sí acepta la notación que el README prometía desde el principio: hasta 50 dados de hasta 1000 caras, con modificador (`3d8+2`). En `d20` marca crítico y pifia.
+Los medidores (`!amor`, `!iq`, `!suerte`, `!simp`, `!cordura`, `!ship`, `!nombrerpg`, `!tarot`, `!horoscopo`) usan un **hash estable**, no `Math.random()`: el mismo nombre da siempre el mismo resultado. Con azar puro el chat repite el comando hasta que sale el número que le gusta y la broma se muere. Los que llevan "de hoy" cambian con la fecha; el resto no cambian nunca.
+
+### 🎲 Azar y decisiones
+
+| Comando       | Endpoint               | Qué devuelve                                        |
+| ------------- | ---------------------- | --------------------------------------------------- |
+| `!8ball`      | `/api/8ball`           | Bola 8 mágica: responde a lo que le preguntes.      |
+| `!adivinanza` | `/api/adivinanza`      | Una adivinanza con su pista.                        |
+| `!carta`      | `/api/carta`           | Saca una carta de la baraja francesa.               |
+| `!dado`       | `/api/dado?tirada=`    | Tira dados: !dado, !dado d20, !dado 2d6+3.          |
+| `!elige`      | `/api/elige?opciones=` | Elige por ti: !elige pizza, sushi, tacos.           |
+| `!flip`       | `/api/flip`            | Cara o cruz.                                        |
+| `!numero`     | `/api/numero?rango=`   | Número al azar: !numero, !numero 100, !numero 5-30. |
+| `!ppt`        | `/api/ppt?jugada=`     | Piedra, papel o tijera contra el bot.               |
+
+### 📊 Medidores
+
+| Comando    | Endpoint                   | Qué devuelve                                           |
+| ---------- | -------------------------- | ------------------------------------------------------ |
+| `!amor`    | `/api/amor?usuario=&otro=` | Compatibilidad entre dos nombres. Siempre da lo mismo. |
+| `!cordura` | `/api/cordura?usuario=`    | Cuánta cordura te queda hoy.                           |
+| `!facha`   | `/api/facha`               | Tu porcentaje de facha.                                |
+| `!iq`      | `/api/iq?usuario=`         | Tu cociente intelectual, fijo de por vida.             |
+| `!memide`  | `/api/memide`              | Una medida con emoji.                                  |
+| `!ship`    | `/api/ship?usuario=&otro=` | Fusiona dos nombres y les pone nota.                   |
+| `!simp`    | `/api/simp?usuario=`       | Tu nivel de simp del día.                              |
+| `!suerte`  | `/api/suerte?usuario=`     | Tu suerte de hoy. Mañana es otra.                      |
+
+### 🔤 Juegos de texto
+
+| Comando      | Endpoint                | Qué devuelve                               |
+| ------------ | ----------------------- | ------------------------------------------ |
+| `!aesthetic` | `/api/aesthetic?texto=` | Ｅｓｐａｃｉａ  ｅｌ  ｔｅｘｔｏ.                        |
+| `!alreves`   | `/api/alreves?texto=`   | Le da la vuelta al texto, emoji incluidos. |
+| `!contar`    | `/api/contar?texto=`    | Cuenta palabras y caracteres.              |
+| `!morse`     | `/api/morse?texto=`     | Traduce a código morse.                    |
+| `!uwu`       | `/api/uwu?texto=`       | Twaduce ew texto a uwu.                    |
+
+### ⚔️ Rol y fantasía
+
+| Comando      | Endpoint                  | Qué devuelve                                |
+| ------------ | ------------------------- | ------------------------------------------- |
+| `!animal`    | `/api/animal`             | Un animal inventado, en texto.              |
+| `!clase`     | `/api/clase`              | Una clase de rol con su trasfondo.          |
+| `!loot`      | `/api/loot`               | Un botín al azar. Sólo narrativo.           |
+| `!mazmorra`  | `/api/mazmorra`           | Genera una sala con habitante y recompensa. |
+| `!nombrerpg` | `/api/nombrerpg?usuario=` | Tu nombre de personaje, siempre el mismo.   |
+| `!superhero` | `/api/superhero`          | Un superhéroe inventado.                    |
+| `!tarot`     | `/api/tarot?usuario=`     | Tu carta del tarot de hoy.                  |
+
+### 📺 Para el directo
+
+| Comando     | Endpoint             | Qué devuelve                        |
+| ----------- | -------------------- | ----------------------------------- |
+| `!excusa`   | `/api/excusa`        | Una excusa para haber perdido.      |
+| `!pregunta` | `/api/pregunta`      | Una pregunta para animar el chat.   |
+| `!reto`     | `/api/reto`          | Un reto para la siguiente partida.  |
+| `!titulo`   | `/api/titulo?juego=` | Un título clickbait para el stream. |
+
+### 🤝 Interacción
+
+| Comando     | Endpoint                        | Qué devuelve                 |
+| ----------- | ------------------------------- | ---------------------------- |
+| `!abrazo`   | `/api/abrazo?usuario=&destino=` | Abraza a otro chatter.       |
+| `!cumplido` | `/api/cumplido`                 | Un cumplido al azar.         |
+| `!insulto`  | `/api/insulto`                  | Un insulto en tono cómico.   |
+| `!zape`     | `/api/zape?usuario=&destino=`   | Dale un zape a otro chatter. |
+
+### 🧰 Utilidades
+
+| Comando        | Endpoint                  | Qué devuelve                              |
+| -------------- | ------------------------- | ----------------------------------------- |
+| `!comandos`    | `/api/comandos`           | Esta misma lista.                         |
+| `!cuentaatras` | `/api/cuentaatras?fecha=` | Días que faltan: !cuentaatras 2026-12-25. |
+| `!factos`      | `/api/factos`             | Un dato curioso.                          |
+| `!horoscopo`   | `/api/horoscopo?signo=`   | El horóscopo del día por signo.           |
+
+`!dice` pasó a llamarse **`!dado`**, y acepta hasta 50 dados de hasta 1000 caras con modificador (`3d8+2`). En `d20` marca crítico y pifia.
 
 ## Comandos con estado
 
 Leen y escriben en la base de datos. Sin los parámetros obligatorios responden **400**. El usuario se crea solo la primera vez, con 1000 monedas.
+
+> **Éstos no se anuncian en la portada ni los devuelve `/api/comandos`: se documentan sólo aquí.**
+>
+> Los endpoints existen y funcionan igual; lo que se quita es el escaparate. Quien llega al sitio desde Google no encuentra `!trabajar` y no se pone a crear usuarios en una economía que es de un canal concreto.
+>
+> **Esto no es seguridad.** `/api/trabajar` sigue siendo una URL pública que responde a cualquiera que la escriba, y cualquiera que mire el chat del canal ve el comando en cuanto alguien lo usa. Reduce el descubrimiento casual —que es de donde sale casi todo el ruido en un canal pequeño—, no el abuso decidido. Para eso hay que exigir un secreto compartido en estos endpoints; ver [Sin autenticación](#sin-autenticación).
 
 | Comando       | Endpoint                                        | Qué hace                                                 |
 | ------------- | ----------------------------------------------- | -------------------------------------------------------- |
@@ -124,8 +195,8 @@ La portada del sitio genera el `!addcom` exacto de cada comando, ya con los par�
 
 - **Framework:** Next.js 15 (Pages Router) con React 19.
 - **Persistencia:** libSQL (`@libsql/client`): fichero local en desarrollo, Turso en producción.
-- **UI de la landing:** TailwindCSS 4 + Radix UI.
-- **Estructura:** cada comando es un handler en `pages/api/<comando>.js`; la lógica vive en `utils/` (`functions.js` para usuarios y duelos, `mercado.js`, `economia.js`, `dados.js`) y las respuestas se formatean en `utils/respond.js`.
+- **UI de la landing:** TailwindCSS 4, sin librería de componentes.
+- **Estructura:** cada comando es un handler en `pages/api/<comando>.js`; la lógica vive en `utils/` (`functions.js` para usuarios y duelos, `mercado.js`, `economia.js`, `dados.js`, `diversion.js` para los comandos sin estado) y las respuestas se formatean en `utils/respond.js`.
 
 ### Sin autenticación
 
@@ -158,12 +229,15 @@ Variables opcionales:
 twitch_commands/
 ├── pages/
 │   ├── index.js           # Landing, generada desde commands/index.js
-│   └── api/               # Un handler por comando (27)
-├── commands/index.js      # Catálogo: fuente única de la lista de comandos
+│   └── api/               # Un handler por comando (55)
+├── commands/index.js      # Catálogo: grupos, visibilidad y ejemplos Nightbot
 ├── utils/
 │   ├── functions.js       # Esquema, usuarios, ruleta y duelos
 │   ├── mercado.js         # Comprar, vender, equipar, inventario
 │   ├── economia.js        # trabajar, diario, dormir, ranking, regalar…
+│   ├── diversion.js       # Los 40 comandos sin estado
+│   ├── aleatorio.js       # Hash estable, azar puro, barras y tramos
+│   ├── listas.js          # Textos de los comandos sin estado
 │   ├── dados.js           # Notación de tiradas (2d6+3)
 │   ├── respond.js         # Formato de respuesta para bots de chat
 │   └── const.js           # Textos, premios y catálogo de items
