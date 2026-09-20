@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 
 /**
  * Interruptor de tema.
@@ -6,18 +6,14 @@ import { useEffect, useState } from "react";
  * El tema real lo aplica el script inline de `_document`, antes de que React
  * exista. Este componente solo lo cambia y lo recuerda.
  *
- * Arranca en `null` y no pinta el icono hasta montarse: en el servidor no hay
- * forma de saber qué tema tiene el visitante, así que renderizar uno concreto
- * garantizaría un desajuste de hidratación y, peor, un icono que parpadea al
- * corregirse.
+ * No guarda el tema en estado de React a propósito. El servidor no puede saber
+ * qué tema tiene el visitante, así que cualquier estado renderizado arranca
+ * equivocado: la versión anterior pintaba el botón vacío y con la etiqueta al
+ * revés hasta que el usuario lo pulsaba. Ahora el icono lo elige el CSS con la
+ * variante `dark:` —la misma clase del `<html>` que ya manda en el resto de la
+ * página— y el botón no depende de haberse hidratado para verse bien.
  */
 export function ThemeToggle() {
-  const [oscuro, setOscuro] = useState(null);
-
-  useEffect(() => {
-    setOscuro(document.documentElement.classList.contains("dark"));
-  }, []);
-
   // Si el visitante no ha elegido nada, el sitio sigue a su sistema aunque lo
   // cambie con la página abierta.
   useEffect(() => {
@@ -31,18 +27,16 @@ export function ThemeToggle() {
       }
       if (guardado) return;
       document.documentElement.classList.toggle("dark", e.matches);
-      setOscuro(e.matches);
     };
     mq.addEventListener("change", alCambiar);
     return () => mq.removeEventListener("change", alCambiar);
   }, []);
 
   function alternar() {
-    const nuevo = !oscuro;
-    document.documentElement.classList.toggle("dark", nuevo);
-    setOscuro(nuevo);
+    const oscuro = !document.documentElement.classList.contains("dark");
+    document.documentElement.classList.toggle("dark", oscuro);
     try {
-      localStorage.setItem("tema", nuevo ? "oscuro" : "claro");
+      localStorage.setItem("tema", oscuro ? "oscuro" : "claro");
     } catch {
       /* sin persistencia, pero el cambio de esta sesión funciona */
     }
@@ -52,14 +46,14 @@ export function ThemeToggle() {
     <button
       type="button"
       onClick={alternar}
-      aria-label={oscuro ? "Cambiar a tema claro" : "Cambiar a tema oscuro"}
-      aria-pressed={oscuro ?? false}
+      aria-label="Cambiar entre tema claro y oscuro"
       className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-borde bg-tarjeta text-texto-suave transition hover:border-acento hover:text-acento"
     >
-      {/* Sin tema conocido todavía, se reserva el hueco para que la cabecera
-          no dé un salto al montarse. */}
-      <span aria-hidden="true" className="text-lg leading-none">
-        {oscuro === null ? "" : oscuro ? "☀️" : "🌙"}
+      <span aria-hidden="true" className="hidden text-lg leading-none dark:inline">
+        ☀️
+      </span>
+      <span aria-hidden="true" className="text-lg leading-none dark:hidden">
+        🌙
       </span>
     </button>
   );
