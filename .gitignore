@@ -47,3 +47,7 @@ next-env.d.ts
 *.db
 *.db-journal
 *.sqlite
+
+# Instrucciones que Next 16 regenera en cada build
+AGENTS.md
+CLAUDE.md
